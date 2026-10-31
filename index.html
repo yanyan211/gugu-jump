@@ -22,8 +22,18 @@
   #tip{position:fixed;left:0;right:0;bottom:8px;text-align:center;color:#86a88f;font:12px/1.4 system-ui,sans-serif;pointer-events:none}
 
   /* ---------- 弹窗（个人资料 / 排行榜） ---------- */
-  .mask{position:fixed;inset:0;background:rgba(16,46,30,.55);display:none;align-items:center;justify-content:center;z-index:10;padding:16px;box-sizing:border-box}
-  .mask.on{display:flex}
+  .mask{position:fixed;inset:0;background:rgba(16,46,30,.55);display:flex;align-items:center;justify-content:center;z-index:10;padding:16px;box-sizing:border-box;
+    opacity:0;visibility:hidden;transition:opacity .28s ease,visibility 0s linear .32s;-webkit-backdrop-filter:blur(0);backdrop-filter:blur(0)}
+  .mask.on{opacity:1;visibility:visible;transition:opacity .25s ease,visibility 0s;-webkit-backdrop-filter:blur(3px);backdrop-filter:blur(3px)}
+  /* 弹窗：从下方带一点回弹地弹上来；关闭时轻轻缩小下沉 */
+  .mask .card{transform:translateY(40px) scale(.92);opacity:0;transition:transform .26s cubic-bezier(.4,0,.7,.2),opacity .2s ease}
+  .mask.on .card{transform:none;opacity:1;transition:transform .5s cubic-bezier(.2,1.35,.35,1),opacity .25s ease}
+  /* 榜单每一行依次滑入 */
+  @keyframes rowIn{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
+  .item.in{animation:rowIn .42s cubic-bezier(.2,1.2,.4,1) both}
+  @keyframes shimmer{0%{opacity:.45}50%{opacity:.9}100%{opacity:.45}}
+  .skel{height:52px;margin:4px 0;border-radius:16px;background:#e3efe1;animation:shimmer 1.1s ease-in-out infinite}
+  @media (prefers-reduced-motion: reduce){ .mask,.mask .card,.mask.on .card{transition:opacity .15s} .item.in{animation:none} }
   .card{width:min(360px,100%);background:#f7fbf5;border-radius:28px;padding:26px 22px 20px;box-sizing:border-box;box-shadow:0 18px 50px rgba(10,40,20,.35);font-family:"PingFang SC","Microsoft YaHei",system-ui,sans-serif;color:#1f3d2b;text-align:center}
   .card h3{margin:0 0 4px;font-size:22px}
   .card .sub{margin:0 0 18px;font-size:13px;color:#6f8f78}
@@ -39,7 +49,7 @@
   .btn.ghost{background:#e4f1e2;color:#2f5f3f}
   .btn:disabled{opacity:.6}
   .err{min-height:18px;font-size:12px;color:#d0574f;margin-top:8px}
-  .board{width:min(400px,100%);max-height:min(640px,calc(100vh - 32px));display:flex;flex-direction:column;padding:20px 14px 14px}
+  .board{width:min(400px,100%);height:min(620px,calc(100vh - 32px));display:flex;flex-direction:column;padding:20px 14px 14px}
   .list{flex:1;overflow:auto;margin:6px -4px 10px;padding:0 4px}
   .item{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:16px}
   .item.me{background:#dff2dc}
@@ -123,7 +133,7 @@ const LB = {
   async uploadAvatar(blob){
     if(!this.online) return await new Promise(res=>{ const fr=new FileReader(); fr.onload=()=>res(fr.result); fr.readAsDataURL(blob); });
     const name=rid()+'.jpg';
-    await this.req('/storage/v1/object/avatars/'+name,{ method:'POST', headers:{'Content-Type':'image/jpeg'}, body:blob });
+    await this.req('/storage/v1/object/avatars/'+name,{ method:'POST', headers:{'Content-Type':'image/jpeg','cache-control':'max-age=31536000'}, body:blob });   // 头像文件名每次都不同，可以放心让浏览器长期缓存
     return LB_CONFIG.url.replace(/\/$/,'')+'/storage/v1/object/public/avatars/'+name;
   },
 };
@@ -144,14 +154,25 @@ const localLB = {
 };
 // 头像图片缓存：只加载我们自己存储里的图片或本机 dataURL
 const avatarCache = {};
-function avatarImg(url){
-  if(!url) return F.migu_face;
-  const ok = url.startsWith('data:image/') || (LB_CONFIG.url && url.startsWith(LB_CONFIG.url.replace(/\/$/,'')+'/storage/'));
-  if(!ok) return F.migu_face;
-  let c=avatarCache[url]; if(!c){ c=avatarCache[url]={img:new Image(),ok:false}; c.img.onload=()=>c.ok=true; c.img.src=url; }
-  return c.ok ? c.img : F.migu_face;
+function trustedAvatar(url){ return !!url && (url.startsWith('data:image/') || (LB_CONFIG.url && url.startsWith(LB_CONFIG.url.replace(/\/$/,'')+'/storage/'))); }
+// 返回 {img, state}：state = 'ok' 已加载 / 'loading' 加载中 / 'none' 用默认菇菇
+function avatarEntry(url){
+  if(!trustedAvatar(url)) return { img:F.migu_face, state:'none' };
+  let c=avatarCache[url];
+  if(!c){ c=avatarCache[url]={ img:new Image(), state:'loading', tries:0 };
+    const load=()=>{ c.tries++; c.img.src = c.tries>1 ? url+(url.includes('?')?'&':'?')+'r='+c.tries : url; };
+    c.img.decoding='async';
+    c.img.onload=()=>{ c.state='ok'; };
+    c.img.onerror=()=>{ if(c.tries<3) setTimeout(load, 800*c.tries); else c.state='none'; };   // 网络抖动时自动重试 2 次
+    load(); }
+  return c.state==='ok' ? c : (c.state==='none' ? { img:F.migu_face, state:'none' } : c);
 }
-function safeAvatarSrc(url){ const im=avatarImg(url); return im===F.migu_face ? A.custom.migu_face : url; }
+function avatarImg(url){ const e=avatarEntry(url); return e.state==='ok'||e.state==='none' ? e.img : null; }
+// 提前加载一批头像（拿到排行榜数据后就调用）
+function preloadAvatars(rows){ (rows||[]).slice(0,60).forEach(r=>avatarEntry(r.avatar)); }
+// HTML 里的头像：直接用真实地址，加载失败才换成菇菇
+function safeAvatarSrc(url){ return trustedAvatar(url) ? url : A.custom.migu_face; }
+function avatarFallback(im){ im.onerror=()=>{ im.onerror=null; im.src=A.custom.migu_face; }; }
 try{ const v=+localStorage.getItem('skin'); if(SKINS[v] && !SKINS[v].locked) skinIdx=v; }catch(e){}
 const DH = 1280, DW = 720;
 let VH = DH;   // 实际可见高度（设计单位），长屏手机会大于 1280
@@ -272,7 +293,10 @@ let boxes=[], hero=null, touchTime=0;
 const LIGHT_HOUSE = {x:0, y:-283.855};
 
 function makeBox(x,y){
-  const def = A.boxes[Math.round(Math.random()*(A.boxes.length-1))];
+  // 按权重随机：每种方块默认 1 份，眼睛圆柱 0.7 份（稍微少见一点）
+  const W = d => d.b===EGG_BOX ? 0.7 : 1;
+  let r = Math.random()*A.boxes.reduce((s,d)=>s+W(d),0), def = A.boxes[A.boxes.length-1];
+  for(const d of A.boxes){ r -= W(d); if(r<0){ def=d; break; } }
   const b = { kind:'box', def, x, y, sx:1, sy:1 };
   layer.children.push(b); boxes.push(b); return b;
 }
@@ -471,7 +495,7 @@ const LBC = { rows:null, at:0, loading:null };
 function refreshBoard(force){
   if(LBC.loading) return LBC.loading;
   if(!force && LBC.rows && Date.now()-LBC.at<20000) return Promise.resolve(LBC.rows);
-  LBC.loading = LB.range(0,500).then(rows=>{ LBC.rows=rows; LBC.at=Date.now(); const me=rows.find(r=>r.id===PLAYER.id); if(me){ PLAYER.best=Math.max(PLAYER.best||0,me.best); savePlayer(); } return rows; })
+  LBC.loading = LB.range(0,500).then(rows=>{ LBC.rows=rows; LBC.at=Date.now(); preloadAvatars(rows); const me=rows.find(r=>r.id===PLAYER.id); if(me){ PLAYER.best=Math.max(PLAYER.best||0,me.best); savePlayer(); } return rows; })
     .catch(e=>{ console.warn(e); return LBC.rows; }).finally(()=>{ LBC.loading=null; });
   return LBC.loading;
 }
@@ -750,7 +774,7 @@ function rankLink(x,y){ // 主页上浅色背景用的排行榜入口
 }
 const easeOut=r=>1-Math.pow(1-r,3);
 function drawAvatar(url,x,y,r){ const im=avatarImg(url); ctx.save(); ctx.beginPath(); ctx.arc(x,-y,r,0,7); ctx.clip();
-  ctx.fillStyle='#d6ecd4'; ctx.fillRect(x-r,-y-r,2*r,2*r); ctx.drawImage(im,x-r,-y-r,2*r,2*r); ctx.restore(); }
+  ctx.fillStyle='#d6ecd4'; ctx.fillRect(x-r,-y-r,2*r,2*r); if(im) ctx.drawImage(im,x-r,-y-r,2*r,2*r); ctx.restore(); }   // 加载中先只显示浅绿底，加载好再出现，不会先闪成菇菇
 function ellipsis(s,maxW,size){ ctx.font=`${size}px "PingFang SC","Microsoft YaHei",system-ui,sans-serif`; if(ctx.measureText(s).width<=maxW) return s;
   while(s.length>1 && ctx.measureText(s+'…').width>maxW) s=s.slice(0,-1); return s+'…'; }
 function drawRankRow(row, rank, y, isMe, glow){
@@ -815,8 +839,8 @@ function openProfile(mode){
     $('pfSub').textContent = mode==='first' ? '给自己取个名字，再选个头像吧' : '可以随时修改昵称和头像';
     $('pfSkip').textContent = mode==='first' ? '跳过' : '取消';
     $('pfName').value = PLAYER.profiled ? PLAYER.name : ''; $('pfName').placeholder = PLAYER.name;
-    $('pfImg').src = safeAvatarSrc(PLAYER.avatar); $('pfErr').textContent='';
-    $('profileMask').classList.add('on');
+    avatarFallback($('pfImg')); $('pfImg').src = safeAvatarSrc(PLAYER.avatar); $('pfErr').textContent='';
+    requestAnimationFrame(()=>$('profileMask').classList.add('on'));
     const close=async(save)=>{
       if(save){
         $('pfOk').disabled=true; $('pfErr').textContent='';
@@ -849,18 +873,21 @@ function squareJpeg(file,size){ return new Promise((res,rej)=>{ const im=new Ima
 
 /* ---------- 完整排行榜 ---------- */
 async function openBoard(){
-  modalOpen=true; $('boardMask').classList.add('on'); $('bdList').innerHTML='<p class="sub">加载中…</p>'; $('bdMe').innerHTML='';
+  modalOpen=true; $('bdMe').innerHTML='';
+  $('bdList').innerHTML='<div class="skel"></div>'.repeat(6); $('bdList').scrollTop=0;   // 加载时先显示几条占位
+  requestAnimationFrame(()=>$('boardMask').classList.add('on'));
   $('bdClose').onclick=()=>{ $('boardMask').classList.remove('on'); modalOpen=false; };
+  $('boardMask').onclick=e=>{ if(e.target===$('boardMask')) $('bdClose').onclick(); };   // 点弹窗外面也能关
   const item=(r,rank)=>{ const d=document.createElement('div'); d.className='item'+(r.id===PLAYER.id?' me':'');
     const no=document.createElement('span'); no.className='no'+(rank<=3?' g'+rank:''); no.textContent=rank;
-    const im=document.createElement('img'); im.src=safeAvatarSrc(r.avatar); im.alt='';
+    const im=document.createElement('img'); avatarFallback(im); im.src=safeAvatarSrc(r.avatar); im.alt=''; im.loading='lazy';
     const nm=document.createElement('span'); nm.className='nm'; nm.textContent=r.name||'';
     const sc=document.createElement('span'); sc.className='sc'; sc.textContent=r.best;
     d.append(no,im,nm,sc); return d; };
   try{
     const rows=(await refreshBoard(true) || []).slice(0,100); $('bdList').innerHTML='';
     if(!rows.length) $('bdList').innerHTML='<p class="sub">还没有人上榜，快来当第一名</p>';
-    rows.forEach((r,i)=>$('bdList').append(item(r,i+1)));
+    rows.forEach((r,i)=>{ const d=item(r,i+1); if(i<12){ d.classList.add('in'); d.style.animationDelay=(0.12+i*0.045)+'s'; } $('bdList').append(d); });   // 前 12 行依次滑入
     if(!LB.online) $('bdSub').textContent='还没连接线上数据库，现在只显示本机记录';
     const mine=rows.findIndex(r=>r.id===PLAYER.id);
     if(mine<0 && rankState.status==='ok') $('bdMe').append(item({id:PLAYER.id,name:PLAYER.name,avatar:PLAYER.avatar,best:rankState.best},rankState.newRank));
