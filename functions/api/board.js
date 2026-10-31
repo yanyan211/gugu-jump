@@ -8,6 +8,13 @@ let mem = null;   // 同一个节点内存里的缓存 { at, body }
 
 export async function onRequestGet(ctx) {
   const now = Date.now();
+  // ?offset=N&limit=M：查某一段名次（结算时排在 500 名以外的玩家用），不缓存
+  const q = new URL(ctx.request.url).searchParams;
+  if (q.has('offset')) {
+    const offset = Math.max(0, parseInt(q.get('offset')) || 0), limit = Math.min(10, Math.max(1, parseInt(q.get('limit')) || 5));
+    const up = await fetch(`${SUPABASE}/rest/v1/players?select=id,name,avatar,best&order=best.desc,updated_at.asc&offset=${offset}&limit=${limit}`, { headers: { apikey: KEY } });
+    return new Response(await up.text(), { status: up.status, headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' } });
+  }
   if (mem && now - mem.at < TTL * 1000) return reply(mem.body, 'mem');
 
   const cache = caches.default;

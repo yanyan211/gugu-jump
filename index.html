@@ -68,6 +68,7 @@
   <h3 id="pfTitle">第一次上榜！</h3><p class="sub" id="pfSub">给自己取个名字，再选个头像吧</p>
   <div class="avatar-pick" id="pfAvatar"><img id="pfImg" alt=""><div class="cam">＋</div></div>
   <div class="hint">点头像可以上传图片，默认就是菇菇哦</div>
+  <div class="hint" id="pfId" style="margin-top:-10px;user-select:all;-webkit-user-select:all"></div>
   <input type="text" id="pfName" maxlength="12" autocomplete="off">
   <div class="err" id="pfErr"></div>
   <div class="row"><button class="btn ghost" id="pfSkip">跳过</button><button class="btn main" id="pfOk">确定</button></div>
@@ -110,7 +111,26 @@ const LB = {
     if(!r.ok) throw new Error((await r.text()).slice(0,200)||r.status);
     const t=await r.text(); return t?JSON.parse(t):null;
   },
-  rpc(fn, body){ return this.req('/rest/v1/rpc/'+fn,{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) }); },
+  async edge(path, opt, ms=9000){   // 经 Cloudflare 转发；只有网络层失败才返回 null（让调用方改直连），服务器返回的错误照常抛出
+    if(!EDGE.on) return null;
+    const ctl=new AbortController(), tm=setTimeout(()=>ctl.abort(),ms);
+    let r; try{ r=await fetch(path,{...opt,signal:ctl.signal}); }catch(e){ return null; } finally{ clearTimeout(tm); }
+    const t=await r.text();
+    // Cloudflare 这边出问题（额度用完、还没部署、返回了网页而不是数据）：这次会话改为直连 Supabase
+    const isJson = !t || /^\s*[\[{"0-9tfn]/.test(t);
+    if(!isJson || r.status>=500 || r.status===429 || r.status===405 || r.status===403 || (r.status===404 && !t.includes('{'))){ EDGE.on=false; return null; }
+    if(!r.ok) throw new Error(t.slice(0,200)||r.status);   // 数据库返回的正常错误（比如重名）照常抛出
+    try{ return { data: t?JSON.parse(t):null }; }catch(e){ EDGE.on=false; return null; } },
+  async rpc(fn, body){
+    const opt={ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) };
+    const viaEdge = await this.edge('/api/rpc/'+fn,opt);   // 服务器返回的错误（比如重名）会直接抛出
+    if(viaEdge) return viaEdge.data;
+    return this.req('/rest/v1/rpc/'+fn,opt); },
+  // 查自己的名次（不在前 500 名时用）
+  async myRank(){
+    if(!this.online) return null;
+    try{ const r=await this.edge('/api/rank?id='+PLAYER.id,{},6000); if(r) return r.data; }catch(e){}
+    return null; },
   // 提交本局分数（只保留最高分），返回 {best, rank, prev_rank, total}
   async submit(score){
     if(!this.online) return localLB.submit(score);
@@ -128,6 +148,7 @@ const LB = {
   // 排名第 offset+1 起的 limit 个人
   async range(offset, limit){
     if(!this.online) return localLB.range(offset,limit);
+    if(EDGE.on && offset>0){ try{ const r=await this.edge(`/api/board?offset=${offset}&limit=${limit}`,{},6000); if(r) return r.data; }catch(e){} }
     if(EDGE.on && offset===0){
       try{ const ctl=new AbortController(), tm=setTimeout(()=>ctl.abort(),2500);
         const r=await fetch('/api/board',{signal:ctl.signal}); clearTimeout(tm);
@@ -140,7 +161,8 @@ const LB = {
   async uploadAvatar(blob){
     if(!this.online) return await new Promise(res=>{ const fr=new FileReader(); fr.onload=()=>res(fr.result); fr.readAsDataURL(blob); });
     const name=rid()+'.jpg';
-    await this.req('/storage/v1/object/avatars/'+name,{ method:'POST', headers:{'Content-Type':'image/jpeg','cache-control':'max-age=31536000'}, body:blob });   // 头像文件名每次都不同，可以放心让浏览器长期缓存
+    const viaEdge = await this.edge('/api/upload/'+name,{ method:'POST', headers:{'Content-Type':'image/jpeg'}, body:blob },15000);
+    if(!viaEdge) await this.req('/storage/v1/object/avatars/'+name,{ method:'POST', headers:{'Content-Type':'image/jpeg','cache-control':'max-age=31536000'}, body:blob });   // 头像文件名每次都不同，可以放心让浏览器长期缓存
     return LB_CONFIG.url.replace(/\/$/,'')+'/storage/v1/object/public/avatars/'+name;
   },
 };
@@ -163,7 +185,8 @@ const localLB = {
 const avatarCache = {};
 // 部署在 Cloudflare 时，榜单和头像走同域名的 /api（Cloudflare 就近节点转发 + 长期缓存），更快也更省 Supabase 流量
 const EDGE = { on: /^https?:$/.test(location.protocol) && !/github\.io$/.test(location.hostname) && location.hostname!=='localhost' };
-function avatarURL(url){ if(!EDGE.on || !url || !LB_CONFIG.url) return url;
+function avatarURL(url){ return url;   // 头像直接从 Supabase 自带的 CDN 读取，不占 Cloudflare 函数额度
+  if(!EDGE.on || !url || !LB_CONFIG.url) return url;
   const pre=LB_CONFIG.url.replace(/\/$/,'')+'/storage/v1/object/public/avatars/'; return url.startsWith(pre) ? '/api/avatar/'+url.slice(pre.length) : url; }
 function trustedAvatar(url){ return !!url && (url.startsWith('data:image/') || (LB_CONFIG.url && url.startsWith(LB_CONFIG.url.replace(/\/$/,'')+'/storage/'))); }
 // 返回 {img, state}：state = 'ok' 已加载 / 'loading' 加载中 / 'none' 用默认菇菇
@@ -538,19 +561,30 @@ async function afterGame(score){
   LBC.rows = list;                                          // 本机先更新，下次结算也快
   // 后台上传：只有破纪录、第一次上榜或改过资料时才需要
   if(improved || !meRow || meRow.name!==PLAYER.name || meRow.avatar!==PLAYER.avatar){
-    submitWithRetry(score).then(r=>{ if(r && r.rank && rankState.score===score && r.rank!==rankState.newRank){ rankState.newRank=r.rank; } refreshBoard(true); })
-      .catch(e=>{ console.warn(e); if(rankState.score===score) rankState.note='网络不太好，成绩稍后会再试着上传'; pendingScore=Math.max(pendingScore||0,score); });
+    setPending(Math.max(pendingScore||0,score));   // 先记下，上传成功再清掉（中途关掉微信也不会丢）
+    submitWithRetry(score).then(r=>{ if(pendingScore<=score) setPending(0); if(r && r.rank && rankState.score===score && r.rank!==rankState.newRank){ rankState.newRank=r.rank; } refreshBoard(true); })
+      .catch(e=>{ console.warn(e); if(rankState.score===score) rankState.note='网络不太好，成绩还没传上去，下次打开会自动补传'; setPending(Math.max(pendingScore||0,score)); });
   }
 }
-let pendingScore=0;
+let pendingScore=0; try{ pendingScore=+localStorage.getItem('pending_score')||0; }catch(e){}
+function setPending(v){ pendingScore=v; try{ v?localStorage.setItem('pending_score',String(v)):localStorage.removeItem('pending_score'); }catch(e){} }
+let flushing=false;
+async function flushPending(){
+  if(!pendingScore || flushing || !LB.online) return; flushing=true; const sc=pendingScore;
+  try{ await submitWithRetry(sc); if(pendingScore===sc) setPending(0); refreshBoard(true); }catch(e){ console.warn('补传失败',e); }
+  flushing=false; }
+addEventListener('online', ()=>flushPending());
 async function submitWithRetry(score){
   try{ return await LB.submit(score); }
   catch(e){ if(!String(e.message).includes('name_taken')) throw e;
     PLAYER.name='用户'+String(Math.floor(10000+Math.random()*90000)); savePlayer(); return await LB.submit(score); }
 }
 async function afterGameSlow(score){
+  if(score>(PLAYER.best||0) || !PLAYER.best) setPending(Math.max(pendingScore||0,score));   // 先记下，传上去再清掉
+  let r;
+  try{ r = await submitWithRetry(score); if(pendingScore<=score) setPending(0); PLAYER.best=Math.max(PLAYER.best||0,r.best); savePlayer(); }
+  catch(e){ console.warn(e); rankState = { status:'error', msg: LB.online?'网络不太好，成绩还没传上去，下次打开会自动补传':'' }; return; }
   try{
-    const r = await submitWithRetry(score);
     const n=5, newRank=r.rank, prevRank=Math.max(newRank, r.prev_rank||newRank);
     const start=Math.max(0, Math.min(newRank-3, (r.total||newRank)-n));
     const rows = await LB.range(start, n);
@@ -558,7 +592,7 @@ async function afterGameSlow(score){
     const fromSlot = Math.min(n, prevRank-1-start);
     rankState = { status:'ok', rows, start, toSlot, fromSlot, prevRank, newRank, best:r.best, score, improved: prevRank>newRank || !r.prev_rank, t: prevRank>newRank?0:1, glow:0 };
     if(prevRank>newRank) playOne('score_more');
-  }catch(e){ console.warn(e); rankState = { status:'error', msg: LB.online?'排行榜连接失败，稍后再试':'' }; }
+  }catch(e){ console.warn(e); rankState = { status:'error', msg: `成绩已上榜：第 ${r.rank} 名` }; }
 }
 
 async function autoJump(){
@@ -578,7 +612,7 @@ function goHome(){ ui.page='home'; G.total=0; G.step=0; runGame(-1); }
 function startGame(){
   G.state=0; G.total=0; G.step=0; ui.page=null;
   refreshBoard(false);
-  if(pendingScore){ const sc=pendingScore; pendingScore=0; submitWithRetry(sc).catch(()=>{ pendingScore=Math.max(pendingScore,sc); }); }
+  flushPending();
   runGame(1);
 }
 
@@ -873,6 +907,7 @@ function openProfile(mode){
     $('pfSub').textContent = mode==='first' ? '给自己取个名字，再选个头像吧' : '可以随时修改昵称和头像';
     $('pfSkip').textContent = mode==='first' ? '跳过' : '取消';
     $('pfName').value = PLAYER.profiled ? PLAYER.name : ''; $('pfName').placeholder = PLAYER.name;
+    $('pfId').textContent = '我的 ID：'+PLAYER.id.slice(0,8);
     avatarFallback($('pfImg')); $('pfImg').src = safeAvatarSrc(PLAYER.avatar); $('pfErr').textContent='';
     requestAnimationFrame(()=>$('profileMask').classList.add('on'));
     const close=async(save)=>{
@@ -921,8 +956,21 @@ function renderBoard(all, animate){
   if(!rows.length) list.innerHTML='<p class="sub">还没有人上榜，快来当第一名</p>';
   rows.forEach((r,i)=>{ const d=boardItem(r,i+1); if(animate && i<12){ d.classList.add('in'); d.style.animationDelay=(0.12+i*0.045)+'s'; } list.append(d); });
   if(!animate) list.scrollTop=keep;
-  $('bdMe').innerHTML='';
-  if(rows.findIndex(r=>r.id===PLAYER.id)<0 && rankState.status==='ok') $('bdMe').append(boardItem({id:PLAYER.id,name:PLAYER.name,avatar:PLAYER.avatar,best:rankState.best},rankState.newRank));
+  renderMe(all);
+}
+let meRankInfo=null;
+function renderMe(all){
+  const box=$('bdMe'); box.innerHTML='';
+  if(meRankInfo && meRankInfo.total) $('bdSub').textContent=`共 ${meRankInfo.total} 位娘娘上榜 · 按最高分排名`;
+  const i=(all||[]).findIndex(r=>r.id===PLAYER.id);
+  if(i>=0 && i<100) return;                              // 已经在上面的列表里高亮了
+  let rank=null, best=PLAYER.best||0;
+  if(i>=0) rank=i+1;
+  else if(rankState.status==='ok') { rank=rankState.newRank; best=rankState.best; }
+  else if(meRankInfo && meRankInfo.found){ rank=meRankInfo.rank; best=meRankInfo.best; }
+  if(rank) box.append(boardItem({id:PLAYER.id,name:PLAYER.name,avatar:PLAYER.avatar,best},rank));
+  else if(pendingScore){ const p=document.createElement('p'); p.className='sub'; p.style.margin='6px 0'; p.textContent='你的成绩还在上传中，网络好一点就会出现'; box.append(p); }
+  else if(meRankInfo && !meRankInfo.found){ const p=document.createElement('p'); p.className='sub'; p.style.margin='6px 0'; p.textContent='玩完一局就能上榜啦'; box.append(p); }
 }
 async function openBoard(){
   modalOpen=true; boardOpen=true; boardShown=''; $('bdMe').innerHTML=''; $('bdList').scrollTop=0;
@@ -930,6 +978,8 @@ async function openBoard(){
   $('bdClose').onclick=()=>{ $('boardMask').classList.remove('on'); modalOpen=false; boardOpen=false; };
   $('boardMask').onclick=e=>{ if(e.target===$('boardMask')) $('bdClose').onclick(); };
   if(!LB.online) $('bdSub').textContent='还没连接线上数据库，现在只显示本机记录';
+  (meRankInfo && Date.now()-(meRankInfo.at||0)<120000 ? Promise.resolve(null) : LB.myRank()).then(r=>{ if(r) r.at=Date.now(); if(r){ meRankInfo=r; if(r.found){ PLAYER.best=Math.max(PLAYER.best||0,r.best); savePlayer(); } if(boardOpen) renderMe(LBC.rows); } });
+  flushPending();
   if(LBC.rows && LBC.rows.length){ renderBoard(LBC.rows,true); refreshBoard(Date.now()-LBC.at>15000); return; }   // 有缓存：立刻显示，后台更新
   $('bdList').innerHTML='<div class="skel"></div>'.repeat(6);
   const rows=await refreshBoard(true);
@@ -992,6 +1042,7 @@ function frame(now){
 }
 function boot(){
   refreshBoard(true);   // 一打开就在后台把排行榜拉下来
+  setTimeout(flushPending, 1500);   // 上次没传上去的成绩，打开时补传
   loadAll().then(()=>{ resize(); runGame(-1); requestAnimationFrame(frame); const l=document.getElementById('loading'); l.classList.add('hide'); setTimeout(()=>l.remove(),400); })
   .catch(e=>{ console.warn(e); const t=document.getElementById('ldText'); t.textContent='加载失败了，网络可能不太好';
     const b=document.createElement('button'); b.textContent='重新加载'; b.onclick=()=>location.reload(); t.after(b); });
