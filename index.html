@@ -109,7 +109,7 @@ const LB = {
     if(!this.online) return localLB.saveProfile();
     return this.rpc('update_profile',{ p_id:PLAYER.id, p_secret:PLAYER.secret, p_name:PLAYER.name, p_avatar:PLAYER.avatar });
   },
-  // 昵称是否还没人用（不区分大小写）
+  // 昵称是否还没人用（区分大小写：Momo 和 momo 算不同的名字）
   async nameAvailable(name){
     if(!this.online) return localLB.nameAvailable(name);
     return this.rpc('name_available',{ p_name:name, p_id:PLAYER.id });
@@ -137,7 +137,7 @@ const localLB = {
     else { prev=a.length+1; me={id:PLAYER.id,best:score,t:Date.now()}; a.push(me); }
     me.name=PLAYER.name; me.avatar=PLAYER.avatar; this.store(a);
     return { best:me.best, rank:this.rankOf(a,me.id), prev_rank:prev, total:a.length }; },
-  async nameAvailable(n){ n=n.trim().toLowerCase(); return !this.load().some(r=>r.id!==PLAYER.id && (r.name||'').toLowerCase()===n); },
+  async nameAvailable(n){ n=n.trim(); return !this.load().some(r=>r.id!==PLAYER.id && (r.name||'')===n); },
   async saveProfile(){ const a=this.load(), me=a.find(r=>r.id===PLAYER.id); if(me){ me.name=PLAYER.name; me.avatar=PLAYER.avatar; this.store(a);} },
   async range(o,l){ return this.sorted(this.load()).slice(o,o+l).map(({id,name,avatar,best})=>({id,name,avatar,best})); },
 };
