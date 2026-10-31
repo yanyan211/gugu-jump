@@ -7,6 +7,7 @@
 <link rel="icon" href="favicon.png">
 <link rel="apple-touch-icon" href="favicon.png">
 <meta name="description" content="菇菇跳一跳：和咪菇一起跳一跳，冲上总排行榜！">
+<link rel="preconnect" href="https://mltzilmrptwhuxbtktet.supabase.co" crossorigin>
 <style>
   :root{--bg:#d6e6cf}
   html,body{margin:0;height:100%;background:#d6e6cf;overflow:hidden;touch-action:none;-webkit-user-select:none;user-select:none}
@@ -454,21 +455,62 @@ function heroMiss(target, original){
   // 踏空：一直掉到地面上
   tw(0.5,(r=>{ const y0=hero.y,E0=hero.E; return q=>{ hero.y=y0-E0*q; hero.E=E0*(1-q); }; })(),quadIn);
 }
-function gameOver(){ G.state=4; const score=G.total; setTimeout(()=>{ ui.page='over'; afterGame(score); },500); }
+function gameOver(){ G.state=4; const score=G.total; afterGame(score); setTimeout(()=>{ ui.page='over'; },500); }
 let rankState = { status:'idle' };
+/* ---------- 排行榜本地缓存：提前把榜单拉下来，结算时立刻在本机算出名次并播放动画，上传在后台进行 ---------- */
+const LBC = { rows:null, at:0, loading:null };
+function refreshBoard(force){
+  if(LBC.loading) return LBC.loading;
+  if(!force && LBC.rows && Date.now()-LBC.at<20000) return Promise.resolve(LBC.rows);
+  LBC.loading = LB.range(0,500).then(rows=>{ LBC.rows=rows; LBC.at=Date.now(); const me=rows.find(r=>r.id===PLAYER.id); if(me){ PLAYER.best=Math.max(PLAYER.best||0,me.best); savePlayer(); } return rows; })
+    .catch(e=>{ console.warn(e); return LBC.rows; }).finally(()=>{ LBC.loading=null; });
+  return LBC.loading;
+}
+// 按“分数高的在前，同分先达到的在前”排名；me 用指定分数放进去
+function localRank(rows, best, isNewRecord){
+  let r=1; for(const x of rows){ if(x.id===PLAYER.id) continue; if(x.best>best || (x.best===best && isNewRecord)) r++; } return r; }
 async function afterGame(score){
   rankState = { status:'loading' };
   if(!PLAYER.profiled){ await openProfile('first'); }
+  const rows0 = await (LBC.rows ? Promise.resolve(LBC.rows) : refreshBoard(true));
+  if(!rows0){ return afterGameSlow(score); }               // 榜单都拉不下来：走原来的方式
+  const meRow = rows0.find(r=>r.id===PLAYER.id);
+  const oldBest = meRow ? meRow.best : null;
+  const newBest = oldBest==null ? score : Math.max(oldBest, score);
+  const improved = oldBest==null || score>oldBest;
+  const others = rows0.filter(r=>r.id!==PLAYER.id);
+  const prevRank = oldBest==null ? others.length+2 : localRank(rows0, oldBest, false);
+  const newRank = localRank(rows0, newBest, improved);
+  if(newRank>rows0.length && rows0.length>=500) return afterGameSlow(score);   // 排在 500 名以外：交给服务器算
+  // 本机组出新的榜单，立刻显示
+  const me = { id:PLAYER.id, name:PLAYER.name, avatar:PLAYER.avatar, best:newBest };
+  const list = others.slice(); list.splice(newRank-1, 0, me);
+  const n=5, start=Math.max(0, Math.min(newRank-3, list.length-n));
+  const toSlot=newRank-1-start, fromSlot=Math.min(n, Math.max(newRank,prevRank)-1-start);
+  rankState = { status:'ok', rows:list.slice(start,start+n), start, toSlot, fromSlot, prevRank:Math.max(newRank,prevRank), newRank, best:newBest, score, improved, t: prevRank>newRank?0:1, glow:0 };
+  if(prevRank>newRank) playOne('score_more');
+  PLAYER.best=newBest; savePlayer();
+  LBC.rows = list;                                          // 本机先更新，下次结算也快
+  // 后台上传：只有破纪录、第一次上榜或改过资料时才需要
+  if(improved || !meRow || meRow.name!==PLAYER.name || meRow.avatar!==PLAYER.avatar){
+    submitWithRetry(score).then(r=>{ if(r && r.rank && rankState.score===score && r.rank!==rankState.newRank){ rankState.newRank=r.rank; } refreshBoard(true); })
+      .catch(e=>{ console.warn(e); if(rankState.score===score) rankState.note='网络不太好，成绩稍后会再试着上传'; pendingScore=Math.max(pendingScore||0,score); });
+  }
+}
+let pendingScore=0;
+async function submitWithRetry(score){
+  try{ return await LB.submit(score); }
+  catch(e){ if(!String(e.message).includes('name_taken')) throw e;
+    PLAYER.name='用户'+String(Math.floor(10000+Math.random()*90000)); savePlayer(); return await LB.submit(score); }
+}
+async function afterGameSlow(score){
   try{
-    let r;
-    try{ r = await LB.submit(score); }
-    catch(e){ if(!String(e.message).includes('name_taken')) throw e;
-      PLAYER.name='用户'+String(Math.floor(10000+Math.random()*90000)); savePlayer(); r = await LB.submit(score); }
+    const r = await submitWithRetry(score);
     const n=5, newRank=r.rank, prevRank=Math.max(newRank, r.prev_rank||newRank);
     const start=Math.max(0, Math.min(newRank-3, (r.total||newRank)-n));
     const rows = await LB.range(start, n);
     const toSlot = newRank-1-start;
-    const fromSlot = Math.min(n, prevRank-1-start);   // 原名次不在这 5 行里，就从面板下方升上来
+    const fromSlot = Math.min(n, prevRank-1-start);
     rankState = { status:'ok', rows, start, toSlot, fromSlot, prevRank, newRank, best:r.best, score, improved: prevRank>newRank || !r.prev_rank, t: prevRank>newRank?0:1, glow:0 };
     if(prevRank>newRank) playOne('score_more');
   }catch(e){ console.warn(e); rankState = { status:'error', msg: LB.online?'排行榜连接失败，稍后再试':'' }; }
@@ -490,6 +532,8 @@ function applySkin(i){ const sk=SKINS[i]; if(!sk||sk.locked) return; skinIdx=i; 
 function goHome(){ ui.page='home'; G.total=0; G.step=0; runGame(-1); }
 function startGame(){
   G.state=0; G.total=0; G.step=0; ui.page=null;
+  refreshBoard(false);
+  if(pendingScore){ const sc=pendingScore; pendingScore=0; submitWithRetry(sc).catch(()=>{ pendingScore=Math.max(pendingScore,sc); }); }
   runGame(1);
 }
 
@@ -738,6 +782,7 @@ function drawOver(){
     drawDigits(String(st.best),F.digitsColor,-40,-200,30,0);
     text(`第 ${st.newRank} 名`,160,-200,26,'#bff0c9');
   } else { text('历史最高分:',-78,-200,28,'#fff'); drawDigits(String(getHistory()),F.digitsColor,95,-200,30); }
+  if(st.note) text(st.note,0,-250,20,'rgba(255,255,255,0.75)');
   button('btn_restart',0,-330,300,100,'再玩一次',40,'#000',19.952,()=>startGame());
   ctx.strokeStyle='rgba(255,255,255,0.85)'; ctx.lineWidth=3; rrect(-120,-(-445)-36,240,72,36); ctx.stroke();
   text('返回主页',0,-445,30,'#fff'); ui.btns.push({x:-120,y:-445-36,w:240,h:72,onClick:goHome});
@@ -798,7 +843,7 @@ async function openBoard(){
     const sc=document.createElement('span'); sc.className='sc'; sc.textContent=r.best;
     d.append(no,im,nm,sc); return d; };
   try{
-    const rows=await LB.range(0,100); $('bdList').innerHTML='';
+    const rows=(await refreshBoard(true) || []).slice(0,100); $('bdList').innerHTML='';
     if(!rows.length) $('bdList').innerHTML='<p class="sub">还没有人上榜，快来当第一名</p>';
     rows.forEach((r,i)=>$('bdList').append(item(r,i+1)));
     if(!LB.online) $('bdSub').textContent='还没连接线上数据库，现在只显示本机记录';
@@ -860,6 +905,7 @@ function frame(now){
   stepTweens(dt); updateShadowPlane(hero,dt); render(); requestAnimationFrame(frame);
 }
 function boot(){
+  refreshBoard(true);   // 一打开就在后台把排行榜拉下来
   loadAll().then(()=>{ resize(); runGame(-1); requestAnimationFrame(frame); const l=document.getElementById('loading'); l.classList.add('hide'); setTimeout(()=>l.remove(),400); })
   .catch(e=>{ console.warn(e); const t=document.getElementById('ldText'); t.textContent='加载失败了，网络可能不太好';
     const b=document.createElement('button'); b.textContent='重新加载'; b.onclick=()=>location.reload(); t.after(b); });
