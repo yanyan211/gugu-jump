@@ -562,9 +562,30 @@ async function afterGame(score){
   // 后台上传：只有破纪录、第一次上榜或改过资料时才需要
   if(improved || !meRow || meRow.name!==PLAYER.name || meRow.avatar!==PLAYER.avatar){
     setPending(Math.max(pendingScore||0,score));   // 先记下，上传成功再清掉（中途关掉微信也不会丢）
-    submitWithRetry(score).then(r=>{ if(pendingScore<=score) setPending(0); if(r && r.rank && rankState.score===score && r.rank!==rankState.newRank){ rankState.newRank=r.rank; } refreshBoard(true); })
+    submitWithRetry(score).then(r=>{ if(pendingScore<=score) setPending(0); if(r && r.rank) correctRank(score, r.rank, r.best); refreshBoard(true); })
       .catch(e=>{ console.warn(e); if(rankState.score===score) rankState.note='网络不太好，成绩还没传上去，下次打开会自动补传'; setPending(Math.max(pendingScore||0,score)); });
+  } else if(Date.now()-LBC.at>15000){
+    // 没破纪录不用上传；但本机榜单可能旧了，拉一份新的再核对名次
+    refreshBoard(true).then(rows=>{ if(!rows || rankState.score!==score) return; const i=rows.findIndex(x=>x.id===PLAYER.id); if(i>=0) correctRank(score, i+1, rows[i].best); });
   }
+}
+// 用服务器（或最新榜单）的真实名次，重新取名次附近的 5 个人，替换掉本机估算的那一段
+async function correctRank(score, rank, best){
+  if(rankState.status!=='ok' || rankState.score!==score) return;
+  if(rank===rankState.newRank && Date.now()-LBC.at<15000) return;   // 本来就对
+  const n=5, start=Math.max(0, rank-3);
+  let rows=null;
+  try{ rows = await LB.range(start, n); }catch(e){}
+  if(rankState.status!=='ok' || rankState.score!==score) return;
+  if(!rows || !rows.length){ rankState.newRank=rank; return; }
+  // 名单里一定要有“我”，并且在正确的位置
+  const me={ id:PLAYER.id, name:PLAYER.name, avatar:PLAYER.avatar, best: best||rankState.best };
+  rows=rows.filter(x=>x.id!==PLAYER.id); rows.splice(Math.min(rank-1-start, rows.length), 0, me); rows=rows.slice(0,n);
+  const toSlot=rows.findIndex(x=>x.id===PLAYER.id);
+  const animating = rankState.t<1;
+  Object.assign(rankState, { rows, start, toSlot, newRank: start+toSlot+1, best: me.best,
+    fromSlot: animating ? Math.min(n, Math.max(toSlot, rankState.prevRank-1-start)) : toSlot,
+    prevRank: Math.max(start+toSlot+1, rankState.prevRank) });
 }
 let pendingScore=0; try{ pendingScore=+localStorage.getItem('pending_score')||0; }catch(e){}
 function setPending(v){ pendingScore=v; try{ v?localStorage.setItem('pending_score',String(v)):localStorage.removeItem('pending_score'); }catch(e){} }
@@ -611,7 +632,7 @@ function applySkin(i){ const sk=SKINS[i]; if(!sk||sk.locked) return; skinIdx=i; 
 function goHome(){ ui.page='home'; G.total=0; G.step=0; runGame(-1); }
 function startGame(){
   G.state=0; G.total=0; G.step=0; ui.page=null;
-  refreshBoard(false);
+  if(Date.now()-LBC.at>15000) refreshBoard(true);
   flushPending();
   runGame(1);
 }
