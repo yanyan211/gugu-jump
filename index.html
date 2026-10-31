@@ -169,7 +169,7 @@ function avatarEntry(url){
 }
 function avatarImg(url){ const e=avatarEntry(url); return e.state==='ok'||e.state==='none' ? e.img : null; }
 // 提前加载一批头像（拿到排行榜数据后就调用）
-function preloadAvatars(rows){ (rows||[]).slice(0,60).forEach(r=>avatarEntry(r.avatar)); }
+function preloadAvatars(rows){ (rows||[]).slice(0,10).forEach(r=>avatarEntry(r.avatar)); }   // 只预载前 10 名，其余滚到再加载
 // HTML 里的头像：直接用真实地址，加载失败才换成菇菇
 function safeAvatarSrc(url){ return trustedAvatar(url) ? url : A.custom.migu_face; }
 function avatarFallback(im){ im.onerror=()=>{ im.onerror=null; im.src=A.custom.migu_face; }; }
@@ -494,7 +494,7 @@ let rankState = { status:'idle' };
 const LBC = { rows:null, at:0, loading:null };
 function refreshBoard(force){
   if(LBC.loading) return LBC.loading;
-  if(!force && LBC.rows && Date.now()-LBC.at<20000) return Promise.resolve(LBC.rows);
+  if(!force && LBC.rows && Date.now()-LBC.at<60000) return Promise.resolve(LBC.rows);   // 1 分钟内不重复拉榜单
   LBC.loading = LB.range(0,500).then(rows=>{ LBC.rows=rows; LBC.at=Date.now(); preloadAvatars(rows); const me=rows.find(r=>r.id===PLAYER.id); if(me){ PLAYER.best=Math.max(PLAYER.best||0,me.best); savePlayer(); } return rows; })
     .catch(e=>{ console.warn(e); return LBC.rows; }).finally(()=>{ LBC.loading=null; });
   return LBC.loading;
@@ -862,13 +862,13 @@ function openProfile(mode){
     $('pfOk').onclick=()=>close(true); $('pfSkip').onclick=()=>close(false);
     $('pfAvatar').onclick=()=>$('pfFile').click();
     $('pfFile').onchange=async()=>{ const f=$('pfFile').files[0]; $('pfFile').value=''; if(!f) return;
-      try{ pendingAvatar=await squareJpeg(f,192); $('pfImg').src=URL.createObjectURL(pendingAvatar); }catch(e){ $('pfErr').textContent='这张图片读不出来，换一张试试'; } };
+      try{ pendingAvatar=await squareJpeg(f,112); $('pfImg').src=URL.createObjectURL(pendingAvatar); }catch(e){ $('pfErr').textContent='这张图片读不出来，换一张试试'; } };
     setTimeout(()=>$('pfName').focus(),50);
   });
 }
 // 把图片裁成正方形并压缩，头像小而清晰
 function squareJpeg(file,size){ return new Promise((res,rej)=>{ const im=new Image(); im.onload=()=>{ const s=Math.min(im.width,im.height), c=document.createElement('canvas'); c.width=c.height=size;
-  c.getContext('2d').drawImage(im,(im.width-s)/2,(im.height-s)/2,s,s,0,0,size,size); c.toBlob(b=>b?res(b):rej(),'image/jpeg',0.86); URL.revokeObjectURL(im.src); };
+  c.getContext('2d').drawImage(im,(im.width-s)/2,(im.height-s)/2,s,s,0,0,size,size); c.toBlob(b=>b?res(b):rej(),'image/jpeg',0.8); URL.revokeObjectURL(im.src); };
   im.onerror=rej; im.src=URL.createObjectURL(file); }); }
 
 /* ---------- 完整排行榜 ---------- */
@@ -885,7 +885,7 @@ async function openBoard(){
     const sc=document.createElement('span'); sc.className='sc'; sc.textContent=r.best;
     d.append(no,im,nm,sc); return d; };
   try{
-    const rows=(await refreshBoard(true) || []).slice(0,100); $('bdList').innerHTML='';
+    const rows=(await refreshBoard(false) || []).slice(0,100); $('bdList').innerHTML='';
     if(!rows.length) $('bdList').innerHTML='<p class="sub">还没有人上榜，快来当第一名</p>';
     rows.forEach((r,i)=>{ const d=item(r,i+1); if(i<12){ d.classList.add('in'); d.style.animationDelay=(0.12+i*0.045)+'s'; } $('bdList').append(d); });   // 前 12 行依次滑入
     if(!LB.online) $('bdSub').textContent='还没连接线上数据库，现在只显示本机记录';
