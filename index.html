@@ -406,8 +406,17 @@ function move(){
 }
 function stepClear(){ while(boxes.length>5){ const b=boxes.shift(); const i=layer.children.indexOf(b); if(i>=0) layer.children.splice(i,1); } }
 
+/* ---------- 小彩蛋：在 Baby's Horizon（眼睛圆柱）上安静站够 EGG_TIME 秒，+17 分；每个方块只触发一次 ---------- */
+const EGG_BOX='myc1', EGG_TIME=3, EGG_SCORE=17;
+function eggTick(dt){
+  const b=hero&&hero.onBox; if(G.state!==1 || !b || b.def.b!==EGG_BOX || b.egg || hero.air) return;
+  b.stay=(b.stay||0)+dt;
+  if(b.stay>=EGG_TIME){ b.egg=true; G.total+=EGG_SCORE; recordHistory(); heroShowScore(EGG_SCORE); playOne('score_more');
+    b.flash=1; tweenProps(b,1.2,{flash:0}); }
+}
 function touchStart(){
   if(G.state!=1) return;
+  if(hero.onBox) hero.onBox.stay=0;   // 一按下就重新计时：必须一直不动
   G.state=2; touchTime=0; hero.baseX=hero.x; hero.baseY=hero.y; playStart();
 }
 async function touchEnd(){
@@ -576,6 +585,11 @@ function drawBoxShadow(b){
 function drawBox(b){
   ctx.save(); ctx.translate(b.x, -b.y); ctx.scale(b.sx, b.sy); ctx.translate(-b.x, b.y);
   spr(b.def.b, b.x, b.y, b.def.bs[0], b.def.bs[1], 0.5, 0);
+  if(b.flash>0){ // 彩蛋触发：眼睛顶面亮一下
+    const P=b.def.p, xs=P.map(p=>p[0]), ys=P.map(p=>p[1]), rx=(Math.max(...xs)-Math.min(...xs))/2, ry=(Math.max(...ys)-Math.min(...ys))/2;
+    ctx.fillStyle=`rgba(255,236,214,${0.75*b.flash})`; ctx.beginPath(); ctx.ellipse(b.x+b.def.c[0],-(b.y+b.def.c[1]),rx,ry,0,0,7); ctx.fill();
+    ctx.strokeStyle=`rgba(255,190,200,${b.flash})`; ctx.lineWidth=4; const k=1+0.35*(1-b.flash);
+    ctx.beginPath(); ctx.ellipse(b.x+b.def.c[0],-(b.y+b.def.c[1]),rx*k,ry*k,0,0,7); ctx.stroke(); }
   ctx.restore();
 }
 function heroFrame(h){ const M=MIGU, r=Math.abs(h.bodyAngle)/360; return { idx:Math.round(r*M.n)%M.n, row:h.bodyAngle>0?1:0 }; }
@@ -902,6 +916,7 @@ let last=performance.now();
 function frame(now){
   { const [w,h]=viewSize(); if(w && h>=200 && (w!==lastW || h!==lastH)) resize(); }   // 尺寸变了（比如微信内置浏览器工具栏收起）就重新适配
   const dt=Math.min(0.05,(now-last)/1000); last=now;
+  eggTick(dt);
   if(G.state==2){ touchTime+=dt*60; heroTouchStart(dt, boxHeight(boxes[boxes.length-2])); boxTouchStart(boxes[boxes.length-2],dt); }
   stepTweens(dt); updateShadowPlane(hero,dt); render(); requestAnimationFrame(frame);
 }
