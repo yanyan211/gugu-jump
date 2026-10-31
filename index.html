@@ -740,6 +740,27 @@ function drawSkinPreview(i, x, y, k, t){
   ctx.restore();
   if(sk.locked) text('?',x,y+M.foot*k*0.9,80,'rgba(255,255,255,0.95)');
 }
+/* ---------- 主页顶部循环滚动横幅 ---------- */
+const BANNER_TEXT='！！！所有娘娘打开由你榜投积分！！！', BANNER_H=50, BANNER_SPEED=70;   // 速度：设计像素/秒
+function drawBanner(t){
+  const top=VH/2, fs=24, gap=70;
+  // 文字只排版一次，缓存成图片，每帧平移
+  const k=scale*dpr, key='banner'+k;
+  let c=layerCache.get(key);
+  if(!c){ const m=document.createElement('canvas').getContext('2d'); m.font=`700 ${fs}px "PingFang SC","Microsoft YaHei",system-ui,sans-serif`;
+    const w=Math.ceil(m.measureText(BANNER_TEXT).width)+gap;
+    c=document.createElement('canvas'); c.width=Math.ceil(w*k); c.height=Math.ceil(BANNER_H*k); c.dw=w;
+    const g=c.getContext('2d'); g.scale(k,k); g.font=m.font; g.textBaseline='middle'; g.fillStyle='#fff';
+    g.fillText(BANNER_TEXT, 0, BANNER_H/2+1);
+    g.fillStyle='rgba(255,255,255,0.75)'; g.beginPath(); g.arc(w-gap/2,BANNER_H/2,4,0,7); g.fill();   // 两段之间一个小圆点
+    layerCache.set(key,c); }
+  ctx.fillStyle=THEME.green; ctx.fillRect(-VW/2,-top,VW,BANNER_H);
+  ctx.fillStyle='rgba(0,0,0,0.08)'; ctx.fillRect(-VW/2,-top+BANNER_H,VW,3);   // 下沿一道浅阴影
+  const w=c.dw, off=((t*BANNER_SPEED)%w+w)%w;
+  ctx.save(); ctx.beginPath(); ctx.rect(-VW/2,-top,VW,BANNER_H); ctx.clip();
+  for(let x=-VW/2-off; x<VW/2; x+=w) ctx.drawImage(c, x, -top, w, BANNER_H);
+  ctx.restore();
+}
 function drawHome(){
   const t=(performance.now()-home.t0)/1000;
   // 柔和的浅绿底 + 几团光晕
@@ -755,9 +776,10 @@ function drawHome(){
       ctx.fillStyle='rgba(60,110,70,0.18)'; ctx.beginPath(); ctx.ellipse(-10,-(cy-40)+2,52,16,0,0,7); ctx.fill();
       ctx=old; });
     ctx.drawImage(c, -VW/2, -VH/2, VW, VH); }
+  drawBanner(t);
   // 标题（轻轻上下浮动）
   { const [tw,th]=A.title_size, c=cached('title',tw,th,g=>{ g.imageSmoothingQuality='high'; g.drawImage(F.title_hd,0,0,tw,th); });
-    ctx.drawImage(c,-tw/2,-(440+Math.sin(t*1.6)*6)-th/2,tw,th); }
+    ctx.drawImage(c,-tw/2,-(425+Math.sin(t*1.6)*6)-th/2,tw,th); }
   // 展示卡片
   const cy=120;
   if(home.flipT>=0){ home.flipT+=1/60/0.55; if(home.flipT>1) home.flipT=-1; }
@@ -774,7 +796,7 @@ function drawHome(){
   button('btn_start',0,-260,300,100,'开始游戏',40,'#000',19.952,()=>{ if(SKINS[home.view].locked){ ui.toast=Date.now(); ui.toastMsg='这个皮肤还没有上线哦'; } else startGame(); });
   rankLink(0,-370);
   // 右上角：个人中心
-  { const x=Math.min(VW/2,450)-56, y=Math.min(VH/2,760)-62; drawAvatar(PLAYER.avatar,x,y,32); ctx.strokeStyle='#fff'; ctx.lineWidth=4; ctx.beginPath(); ctx.arc(x,-y,32,0,7); ctx.stroke();
+  { const x=Math.min(VW/2,450)-56, y=Math.min(VH/2,760)-BANNER_H-46; drawAvatar(PLAYER.avatar,x,y,32); ctx.strokeStyle='#fff'; ctx.lineWidth=4; ctx.beginPath(); ctx.arc(x,-y,32,0,7); ctx.stroke();
     text('我的',x,y-50,18,THEME.btnText); ui.btns.push({x:x-40,y:y-66,w:80,h:104,onClick:()=>openProfile('edit')}); }
   if(ui.toast && Date.now()-ui.toast<1500) text(ui.toastMsg||'',0,-440,24,THEME.btnText);
 }
