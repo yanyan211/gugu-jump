@@ -8,3 +8,9 @@
 - 排行榜是所有玩家共用的总榜，每人只记录最高分
 
 整个游戏就是一个 `index.html` 文件，用 GitHub Pages 发布即可在线游玩。
+
+## 文件说明
+
+- `index.html`：整个游戏
+- `favicon.png`：网页图标
+- `functions/`：Cloudflare Pages 自动识别的加速函数（排行榜和头像就近缓存）。GitHub Pages 会忽略它，游戏会自动改为直连数据库。

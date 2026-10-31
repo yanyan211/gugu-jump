@@ -128,6 +128,13 @@ const LB = {
   // 排名第 offset+1 起的 limit 个人
   async range(offset, limit){
     if(!this.online) return localLB.range(offset,limit);
+    if(EDGE.on && offset===0){
+      try{ const ctl=new AbortController(), tm=setTimeout(()=>ctl.abort(),2500);
+        const r=await fetch('/api/board',{signal:ctl.signal}); clearTimeout(tm);
+        if(r.ok){ const rows=await r.json(); if(Array.isArray(rows)) return rows.slice(0,limit); }
+      }catch(e){}
+      EDGE.on=false;                                     // 边缘不可用：本次会话改为直连
+    }
     return this.req(`/rest/v1/players?select=id,name,avatar,best&order=best.desc,updated_at.asc&offset=${offset}&limit=${limit}`);
   },
   async uploadAvatar(blob){
@@ -154,13 +161,17 @@ const localLB = {
 };
 // 头像图片缓存：只加载我们自己存储里的图片或本机 dataURL
 const avatarCache = {};
+// 部署在 Cloudflare 时，榜单和头像走同域名的 /api（Cloudflare 就近节点转发 + 长期缓存），更快也更省 Supabase 流量
+const EDGE = { on: /^https?:$/.test(location.protocol) && !/github\.io$/.test(location.hostname) && location.hostname!=='localhost' };
+function avatarURL(url){ if(!EDGE.on || !url || !LB_CONFIG.url) return url;
+  const pre=LB_CONFIG.url.replace(/\/$/,'')+'/storage/v1/object/public/avatars/'; return url.startsWith(pre) ? '/api/avatar/'+url.slice(pre.length) : url; }
 function trustedAvatar(url){ return !!url && (url.startsWith('data:image/') || (LB_CONFIG.url && url.startsWith(LB_CONFIG.url.replace(/\/$/,'')+'/storage/'))); }
 // 返回 {img, state}：state = 'ok' 已加载 / 'loading' 加载中 / 'none' 用默认菇菇
 function avatarEntry(url){
   if(!trustedAvatar(url)) return { img:F.migu_face, state:'none' };
   let c=avatarCache[url];
   if(!c){ c=avatarCache[url]={ img:new Image(), state:'loading', tries:0 };
-    const load=()=>{ c.tries++; c.img.src = c.tries>1 ? url+(url.includes('?')?'&':'?')+'r='+c.tries : url; };
+    const load=()=>{ c.tries++; const u = c.tries===1 ? avatarURL(url) : url+(url.includes('?')?'&':'?')+'r='+c.tries; c.img.src=u; };   // 第一次走边缘缓存，失败再直连
     c.img.decoding='async';
     c.img.onload=()=>{ c.state='ok'; };
     c.img.onerror=()=>{ if(c.tries<3) setTimeout(load, 800*c.tries); else c.state='none'; };   // 网络抖动时自动重试 2 次
@@ -171,8 +182,8 @@ function avatarImg(url){ const e=avatarEntry(url); return e.state==='ok'||e.stat
 // 提前加载一批头像（拿到排行榜数据后就调用）
 function preloadAvatars(rows){ (rows||[]).slice(0,10).forEach(r=>avatarEntry(r.avatar)); }   // 只预载前 10 名，其余滚到再加载
 // HTML 里的头像：直接用真实地址，加载失败才换成菇菇
-function safeAvatarSrc(url){ return trustedAvatar(url) ? url : A.custom.migu_face; }
-function avatarFallback(im){ im.onerror=()=>{ im.onerror=null; im.src=A.custom.migu_face; }; }
+function safeAvatarSrc(url){ return trustedAvatar(url) ? avatarURL(url) : A.custom.migu_face; }
+function avatarFallback(im,url){ im.onerror=()=>{ if(url && im.src.indexOf('/api/avatar/')>=0){ im.src=url; return; } im.onerror=null; im.src=A.custom.migu_face; }; }
 try{ const v=+localStorage.getItem('skin'); if(SKINS[v] && !SKINS[v].locked) skinIdx=v; }catch(e){}
 const DH = 1280, DW = 720;
 let VH = DH;   // 实际可见高度（设计单位），长屏手机会大于 1280
@@ -492,10 +503,11 @@ function gameOver(){ G.state=4; const score=G.total; afterGame(score); setTimeou
 let rankState = { status:'idle' };
 /* ---------- 排行榜本地缓存：提前把榜单拉下来，结算时立刻在本机算出名次并播放动画，上传在后台进行 ---------- */
 const LBC = { rows:null, at:0, loading:null };
+try{ const c=JSON.parse(localStorage.getItem('lb_cache')||'null'); if(c && Array.isArray(c.rows)) LBC.rows=c.rows; }catch(e){}   // 上次的榜单：打开即可显示
 function refreshBoard(force){
   if(LBC.loading) return LBC.loading;
   if(!force && LBC.rows && Date.now()-LBC.at<60000) return Promise.resolve(LBC.rows);   // 1 分钟内不重复拉榜单
-  LBC.loading = LB.range(0,500).then(rows=>{ LBC.rows=rows; LBC.at=Date.now(); preloadAvatars(rows); const me=rows.find(r=>r.id===PLAYER.id); if(me){ PLAYER.best=Math.max(PLAYER.best||0,me.best); savePlayer(); } return rows; })
+  LBC.loading = LB.range(0,500).then(rows=>{ LBC.rows=rows; LBC.at=Date.now(); preloadAvatars(rows); try{ localStorage.setItem('lb_cache',JSON.stringify({rows:rows.slice(0,200)})); }catch(e){} if(boardOpen) renderBoard(rows,false); const me=rows.find(r=>r.id===PLAYER.id); if(me){ PLAYER.best=Math.max(PLAYER.best||0,me.best); savePlayer(); } return rows; })
     .catch(e=>{ console.warn(e); return LBC.rows; }).finally(()=>{ LBC.loading=null; });
   return LBC.loading;
 }
@@ -872,26 +884,35 @@ function squareJpeg(file,size){ return new Promise((res,rej)=>{ const im=new Ima
   im.onerror=rej; im.src=URL.createObjectURL(file); }); }
 
 /* ---------- 完整排行榜 ---------- */
+let boardOpen=false;
+function boardItem(r,rank){ const d=document.createElement('div'); d.className='item'+(r.id===PLAYER.id?' me':'');
+  const no=document.createElement('span'); no.className='no'+(rank<=3?' g'+rank:''); no.textContent=rank;
+  const im=document.createElement('img'); avatarFallback(im,r.avatar); im.src=safeAvatarSrc(r.avatar); im.alt=''; im.loading='lazy';
+  const nm=document.createElement('span'); nm.className='nm'; nm.textContent=r.name||'';
+  const sc=document.createElement('span'); sc.className='sc'; sc.textContent=r.best;
+  d.append(no,im,nm,sc); return d; }
+let boardShown='';
+function renderBoard(all, animate){
+  const rows=(all||[]).slice(0,100), sig=rows.map(r=>r.id+':'+r.best+':'+r.name+':'+r.avatar).join('|');
+  if(!animate && sig===boardShown) return;              // 没变化就不动，避免闪
+  boardShown=sig; const list=$('bdList'), keep=list.scrollTop; list.innerHTML='';
+  if(!rows.length) list.innerHTML='<p class="sub">还没有人上榜，快来当第一名</p>';
+  rows.forEach((r,i)=>{ const d=boardItem(r,i+1); if(animate && i<12){ d.classList.add('in'); d.style.animationDelay=(0.12+i*0.045)+'s'; } list.append(d); });
+  if(!animate) list.scrollTop=keep;
+  $('bdMe').innerHTML='';
+  if(rows.findIndex(r=>r.id===PLAYER.id)<0 && rankState.status==='ok') $('bdMe').append(boardItem({id:PLAYER.id,name:PLAYER.name,avatar:PLAYER.avatar,best:rankState.best},rankState.newRank));
+}
 async function openBoard(){
-  modalOpen=true; $('bdMe').innerHTML='';
-  $('bdList').innerHTML='<div class="skel"></div>'.repeat(6); $('bdList').scrollTop=0;   // 加载时先显示几条占位
+  modalOpen=true; boardOpen=true; boardShown=''; $('bdMe').innerHTML=''; $('bdList').scrollTop=0;
   requestAnimationFrame(()=>$('boardMask').classList.add('on'));
-  $('bdClose').onclick=()=>{ $('boardMask').classList.remove('on'); modalOpen=false; };
-  $('boardMask').onclick=e=>{ if(e.target===$('boardMask')) $('bdClose').onclick(); };   // 点弹窗外面也能关
-  const item=(r,rank)=>{ const d=document.createElement('div'); d.className='item'+(r.id===PLAYER.id?' me':'');
-    const no=document.createElement('span'); no.className='no'+(rank<=3?' g'+rank:''); no.textContent=rank;
-    const im=document.createElement('img'); avatarFallback(im); im.src=safeAvatarSrc(r.avatar); im.alt=''; im.loading='lazy';
-    const nm=document.createElement('span'); nm.className='nm'; nm.textContent=r.name||'';
-    const sc=document.createElement('span'); sc.className='sc'; sc.textContent=r.best;
-    d.append(no,im,nm,sc); return d; };
-  try{
-    const rows=(await refreshBoard(false) || []).slice(0,100); $('bdList').innerHTML='';
-    if(!rows.length) $('bdList').innerHTML='<p class="sub">还没有人上榜，快来当第一名</p>';
-    rows.forEach((r,i)=>{ const d=item(r,i+1); if(i<12){ d.classList.add('in'); d.style.animationDelay=(0.12+i*0.045)+'s'; } $('bdList').append(d); });   // 前 12 行依次滑入
-    if(!LB.online) $('bdSub').textContent='还没连接线上数据库，现在只显示本机记录';
-    const mine=rows.findIndex(r=>r.id===PLAYER.id);
-    if(mine<0 && rankState.status==='ok') $('bdMe').append(item({id:PLAYER.id,name:PLAYER.name,avatar:PLAYER.avatar,best:rankState.best},rankState.newRank));
-  }catch(e){ $('bdList').innerHTML='<p class="sub">排行榜连接失败，稍后再试</p>'; }
+  $('bdClose').onclick=()=>{ $('boardMask').classList.remove('on'); modalOpen=false; boardOpen=false; };
+  $('boardMask').onclick=e=>{ if(e.target===$('boardMask')) $('bdClose').onclick(); };
+  if(!LB.online) $('bdSub').textContent='还没连接线上数据库，现在只显示本机记录';
+  if(LBC.rows && LBC.rows.length){ renderBoard(LBC.rows,true); refreshBoard(Date.now()-LBC.at>15000); return; }   // 有缓存：立刻显示，后台更新
+  $('bdList').innerHTML='<div class="skel"></div>'.repeat(6);
+  const rows=await refreshBoard(true);
+  if(!boardOpen) return;
+  if(rows) renderBoard(rows,true); else $('bdList').innerHTML='<p class="sub">排行榜连接失败，稍后再试</p>';
 }
 
 function render(){
