@@ -154,6 +154,7 @@ function avatarImg(url){
 function safeAvatarSrc(url){ const im=avatarImg(url); return im===F.migu_face ? A.custom.migu_face : url; }
 try{ const v=+localStorage.getItem('skin'); if(SKINS[v] && !SKINS[v].locked) skinIdx=v; }catch(e){}
 const DH = 1280, DW = 720;
+let VH = DH;   // 实际可见高度（设计单位），长屏手机会大于 1280
 // 绿色主题：只改背景、阴影、文字、界面颜色，素材本身不变
 const THEME = { bg:'#d6e6cf', shadow:'rgb(168,191,160)', dim:'rgba(16,46,30,0.66)', panel:'rgba(28,66,45,0.88)',
   score:'#2f5f3f', btnText:'#1f3d2b', green:'#2fb265' };
@@ -174,15 +175,14 @@ function viewSize(){ const vv=window.visualViewport;
 function resize(){
   const [ww, wh] = viewSize(); if(!ww || !wh || wh < 200) return;   // 微信等内置浏览器刚打开时可能报出 0 或很小的高度，先跳过
   lastW=ww; lastH=wh;
-  // fitHeight：高度固定 1280，宽度按屏幕比例（限制在 640~900 之间，宽屏时两侧留边）
-  VW = Math.max(640, Math.min(900, DH * ww / wh));
-  scale = Math.min(wh / DH, ww / VW);
+  // 画布铺满整个屏幕：保证至少能看到 640×1280 的设计区域，屏幕更长或更宽时多出来的部分也画上内容，不留空边
+  scale = Math.min(wh / DH, ww / 640);
   // 画布像素和屏幕物理像素一一对应，避免浏览器二次缩放造成整体发糊
   dpr = Math.min(window.devicePixelRatio || 1, 2);   // 3 倍屏的手机像素量是 2 倍屏的 2.25 倍，画面差别很小，性能差很多
   layerCache.clear();
-  const pw = Math.floor(VW*scale*dpr), ph = Math.floor(DH*scale*dpr);
+  const pw = Math.floor(ww*dpr), ph = Math.floor(wh*dpr);
   cv.width = pw; cv.height = ph; cv.style.width = pw/dpr + 'px'; cv.style.height = ph/dpr + 'px';
-  scale = ph/dpr/DH;
+  VW = pw/dpr/scale; VH = ph/dpr/scale;
 }
 addEventListener('resize', resize); addEventListener('orientationchange', ()=>setTimeout(resize,300)); addEventListener('pageshow', resize);
 if(window.visualViewport) visualViewport.addEventListener('resize', resize);
@@ -668,7 +668,7 @@ function panel(w,h){ // 原版 window_2：深色半透明面板，头部一条�
   ctx.clip(); ctx.fillStyle='rgba(255,255,255,0.09)'; ctx.fillRect(-w/2,-h/2,w,62); ctx.fillRect(-w/6,-h/2+64,w/3,h-64);
   ctx.fillStyle='rgba(255,255,255,0.35)'; ctx.fillRect(-w/2,-h/2+62,w,2); ctx.restore();
   ctx.strokeStyle='rgba(255,255,255,0.15)'; ctx.lineWidth=2; rrect(-w/2,-h/2,w,h,8); ctx.stroke(); }
-function dim(){ ctx.fillStyle=THEME.dim; ctx.fillRect(-VW/2,-DH/2,VW,DH); }
+function dim(){ ctx.fillStyle=THEME.dim; ctx.fillRect(-VW/2,-VH/2,VW,VH); }
 /* ---------- 主页面：标题 + 皮肤展示台 + 左右切换 + 开始游戏 ---------- */
 const home = { view:0, flipT:-1, dir:1, t0:performance.now() };   // view：正在看的皮肤序号
 function homeSwitch(d){ const n=SKINS.length; home.view=(home.view+d+n)%n; home.dir=d; home.flipT=0; if(!SKINS[home.view].locked) applySkin(home.view); playOne('pop'); }
@@ -693,8 +693,9 @@ function drawSkinPreview(i, x, y, k, t){
 function drawHome(){
   const t=(performance.now()-home.t0)/1000;
   // 柔和的浅绿底 + 几团光晕
-  { const c=cached('homebg'+VW, VW, DH, g=>{ g.translate(VW/2,DH/2); const old=ctx; ctx=g;
-      ctx.fillStyle='rgba(214,232,206,0.9)'; ctx.fillRect(-VW/2,-DH/2,VW,DH);
+  { const c=cached('homebg'+VW+'x'+VH, VW, VH, g=>{ g.translate(VW/2,VH/2); const old=ctx; ctx=g;
+      ctx.fillStyle='rgba(214,232,206,0.9)'; ctx.fillRect(-VW/2,-VH/2,VW,VH);
+      softBlob(VW/2-40, VH/2-60, 320, 'rgba(255,255,255,0.5)'); softBlob(-VW/2+60, -VH/2+80, 300, 'rgba(190,226,190,0.55)');   // 长屏多出来的上下区域也有光晕
       softBlob(-260,520,260,'rgba(255,255,255,0.55)'); softBlob(280,-80,300,'rgba(190,226,190,0.6)'); softBlob(-220,-470,240,'rgba(255,255,255,0.45)');
       // 展示卡片 + 小台子（静态部分）
       const cy=120; ctx.save(); ctx.shadowColor='rgba(40,90,55,0.16)'; ctx.shadowBlur=28; ctx.shadowOffsetY=10;
@@ -703,7 +704,7 @@ function drawHome(){
       ctx.fillStyle='#cfe8cf'; ctx.beginPath(); ctx.ellipse(0,-(cy-40),118,40,0,0,7); ctx.fill();
       ctx.fillStyle='rgba(60,110,70,0.18)'; ctx.beginPath(); ctx.ellipse(-10,-(cy-40)+2,52,16,0,0,7); ctx.fill();
       ctx=old; });
-    ctx.drawImage(c, -VW/2, -DH/2, VW, DH); }
+    ctx.drawImage(c, -VW/2, -VH/2, VW, VH); }
   // 标题（轻轻上下浮动）
   { const [tw,th]=A.title_size, c=cached('title',tw,th,g=>{ g.imageSmoothingQuality='high'; g.drawImage(F.title_hd,0,0,tw,th); });
     ctx.drawImage(c,-tw/2,-(440+Math.sin(t*1.6)*6)-th/2,tw,th); }
@@ -723,7 +724,7 @@ function drawHome(){
   button('btn_start',0,-260,300,100,'开始游戏',40,'#000',19.952,()=>{ if(SKINS[home.view].locked){ ui.toast=Date.now(); ui.toastMsg='这个皮肤还没有上线哦'; } else startGame(); });
   rankLink(0,-370);
   // 右上角：个人中心
-  { const x=VW/2-56, y=DH/2-62; drawAvatar(PLAYER.avatar,x,y,32); ctx.strokeStyle='#fff'; ctx.lineWidth=4; ctx.beginPath(); ctx.arc(x,-y,32,0,7); ctx.stroke();
+  { const x=Math.min(VW/2,450)-56, y=Math.min(VH/2,760)-62; drawAvatar(PLAYER.avatar,x,y,32); ctx.strokeStyle='#fff'; ctx.lineWidth=4; ctx.beginPath(); ctx.arc(x,-y,32,0,7); ctx.stroke();
     text('我的',x,y-50,18,THEME.btnText); ui.btns.push({x:x-40,y:y-66,w:80,h:104,onClick:()=>openProfile('edit')}); }
   if(ui.toast && Date.now()-ui.toast<1500) text(ui.toastMsg||'',0,-440,24,THEME.btnText);
 }
@@ -855,7 +856,7 @@ async function openBoard(){
 function render(){
   ctx.setTransform(1,0,0,1,0,0);
   ctx.fillStyle=THEME.bg; ctx.fillRect(0,0,cv.width,cv.height);
-  const s=scale*dpr; ctx.setTransform(s,0,0,s,VW/2*s,DH/2*s); // 原点在画面中心，y 向下（绘制时取反）
+  const s=scale*dpr; ctx.setTransform(s,0,0,s,VW/2*s,VH/2*s); // 原点在画面中心，y 向下（绘制时取反）
   ctx.save(); ctx.translate(layer.x,-layer.y);
   const order=[...boxes].sort((a,b)=>b.y-a.y);
   let heroDrawn=false;
@@ -875,12 +876,12 @@ function render(){
   if(hero && !heroDrawn) drawHeroAll(hero);
   ctx.restore();
   ui.btns=[];
-  if(G.state!=-1 && !ui.page) drawDigits(String(G.total),F.digitsColorBlack,-180.267- (VW-DW)/2,477.079,60,0.5);
+  if(G.state!=-1 && !ui.page) drawDigits(String(G.total),F.digitsColorBlack,-Math.min(VW/2,450)+80,Math.min(VH/2,760)-163,60,0.5);
   if(ui.page==='home') drawHome(); else if(ui.page==='over') drawOver();
 }
 
 /* ---------- 输入 ---------- */
-function toDesign(e){ const r=cv.getBoundingClientRect(); return { x:(e.clientX-r.left)/scale-VW/2, y:DH/2-(e.clientY-r.top)/scale }; }
+function toDesign(e){ const r=cv.getBoundingClientRect(); return { x:(e.clientX-r.left)/scale-VW/2, y:VH/2-(e.clientY-r.top)/scale }; }
 cv.addEventListener('pointerdown',e=>{
   if(modalOpen) return;
   e.preventDefault();
