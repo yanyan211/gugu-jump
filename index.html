@@ -1082,13 +1082,30 @@ const myTurn = ()=> ROOM.playing && ROOM.cur===PLAYER.id && !ROOM.busy;
 function roomToast(t){ ROOM.toast=t; ROOM.toastAt=performance.now(); }
 
 /* ---------- 连接 ---------- */
-function rtClient(){
-  if(!ROOM.client) ROOM.client = new RealtimeClient(LB_CONFIG.url.replace(/^http/,'ws').replace(/\/$/,'')+'/realtime/v1', { params:{ apikey: LB_CONFIG.key, eventsPerSecond: 20 } });
-  return ROOM.client;
+// 两条线路：先走 Cloudflare 中转（国内更稳），不通再直连 Supabase
+function rtClient(kind){
+  ROOM.clients=ROOM.clients||{};
+  if(!ROOM.clients[kind]){
+    const base = kind==='edge' ? location.origin.replace(/^http/,'ws')+'/api/realtime'
+                               : LB_CONFIG.url.replace(/^http/,'ws').replace(/\/$/,'')+'/realtime/v1';
+    ROOM.clients[kind] = new RealtimeClient(base, { params:{ apikey: LB_CONFIG.key, eventsPerSecond: 20 }, timeout: 7000 });
+  }
+  return ROOM.clients[kind];
 }
-function openChannel(code, waitMs=6000){
+function rtDrop(kind){ try{ ROOM.clients && ROOM.clients[kind] && ROOM.clients[kind].disconnect(); }catch(e){} if(ROOM.clients) delete ROOM.clients[kind]; }
+async function openChannelAny(code, waitMs){
+  let order = EDGE.on ? ['edge','direct'] : ['direct'];
+  if(ROOM.rtKind && order.includes(ROOM.rtKind)) order=[ROOM.rtKind, ...order.filter(k=>k!==ROOM.rtKind)];
+  for(const k of order){
+    const ch = await openChannel(code, waitMs, k);
+    if(ch){ ROOM.rtKind=k; return ch; }
+    rtDrop(k);
+  }
+  return null;
+}
+function openChannel(code, waitMs=6000, kind='direct'){
   return new Promise((resolve)=>{
-    const ch = rtClient().channel('room:gugu-'+code, { config:{ presence:{ key: PLAYER.id }, broadcast:{ self:false, ack:false } } });
+    const ch = rtClient(kind).channel('room:gugu-'+code, { config:{ presence:{ key: PLAYER.id }, broadcast:{ self:false, ack:false } } });
     let done=false;
     const finish = ok => { if(done) return; done=true; resolve(ok?ch:null); };
     ch.on('presence', { event:'sync' }, ()=>onPresence(ch));
@@ -1146,7 +1163,7 @@ async function createRoom(){
   setRoomBusy('正在创建房间…');
   for(let i=0;i<5;i++){
     const code = String(10000+Math.floor(Math.random()*90000));
-    const ch = await openChannel(code, 1500);   // 新房间号：等 1.5 秒确认没人在用
+    const ch = await openChannelAny(code, 1500);   // 新房间号：等 1.5 秒确认没人在用
     if(!ch){ setRoomBusy(''); roomError('连接失败了，网络可能不太好，再试一次吧'); return; }
     if(presenceList(ch).filter(m=>m.id!==PLAYER.id).length){ ch.unsubscribe(); continue; }   // 这个号已经有人在用，换一个
     ROOM.ch=ch; ROOM.code=code; ROOM.joinedAt=Date.now(); await track();
@@ -1158,7 +1175,7 @@ async function joinRoom(code){
   code=String(code||'').trim();
   if(!/^\d{5}$/.test(code)){ roomError('房间号是 5 位数字哦'); return; }
   setRoomBusy('正在进入房间…');
-  const ch = await openChannel(code);
+  const ch = await openChannelAny(code, 6000);
   if(!ch){ setRoomBusy(''); roomError('连接失败了，网络可能不太好，再试一次吧'); return; }
   const list = presenceList(ch).filter(m=>m.id!==PLAYER.id);
   const fail = msg=>{ ch.unsubscribe(); setRoomBusy(''); roomError(msg); };
@@ -1178,7 +1195,7 @@ async function finishJoin(ch, code, list, fail){
 }
 function leaveRoom(msg){
   try{ ROOM.ch && ROOM.ch.unsubscribe(); }catch(e){}
-  try{ ROOM.client && ROOM.client.disconnect(); }catch(e){}
+  for(const k in (ROOM.clients||{})) rtDrop(k);
   Object.assign(ROOM,{ client:null, ch:null, code:'', joinedAt:0, members:[], playing:false, busy:false, pressed:false, remoteCharge:false, view:'lobby', hostWasMe:false });
   rand=Math.random; stopSnd();
   if(msg){ ROOM.view='lobby'; renderRoom(); roomError(msg); }
