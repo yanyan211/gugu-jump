@@ -64,6 +64,8 @@
   .card input[type=password]:focus{border-color:#2fb265}
   #acName{margin-top:0}
   .acct{margin-top:14px;font-size:13px;color:#8aa891}
+  .best{margin:-6px 0 14px;font-size:14px;color:#2f5f3f}
+  .best b{font-size:26px;color:#2fb265;margin-left:6px;vertical-align:-2px}
   .acct a{color:#2f8f55;text-decoration:underline;text-underline-offset:3px;cursor:pointer;padding:4px 6px}
   .acct .on{color:#2f8f55;text-decoration:none}
   .row{display:flex;gap:10px;margin-top:18px}
@@ -92,6 +94,7 @@
   <div class="avatar-pick" id="pfAvatar"><img id="pfImg" alt=""><div class="cam">＋</div></div>
   <div class="hint">点头像可以上传图片，默认就是菇菇哦</div>
   <div class="hint" id="pfId" style="margin-top:-10px;user-select:all;-webkit-user-select:all"></div>
+  <div class="best" id="pfBest"></div>
   <input type="text" id="pfName" maxlength="12" autocomplete="off">
   <div class="err" id="pfErr"></div>
   <div class="row"><button class="btn ghost" id="pfSkip">跳过</button><button class="btn main" id="pfOk">确定</button></div>
@@ -133,7 +136,7 @@
   <div class="row" style="margin-top:6px"><button class="btn ghost" id="rmClose">关闭</button></div>
 </div></div>
 <div class="mask" id="boardMask"><div class="card board">
-  <h3>总排行榜</h3><p class="sub" id="bdSub">按每个人的最高分排名</p>
+  <h3>总排行榜</h3><p class="sub" id="bdSub">按最高分排名 · 每天 0 点更新</p>
   <div class="list" id="bdList"></div><div class="pin" id="bdMe"></div>
   <div class="row" style="margin-top:8px"><button class="btn ghost" id="bdClose">关闭</button></div>
 </div></div>
@@ -593,9 +596,21 @@ try{ const c=JSON.parse(localStorage.getItem('lb_cache')||'null'); if(c && Array
 function refreshBoard(maxAge=120000){
   if(LBC.loading) return LBC.loading;
   if(LBC.rows && Date.now()-LBC.at<maxAge) return Promise.resolve(LBC.rows);
-  LBC.loading = LB.range(0,500).then(rows=>{ LBC.rows=rows; LBC.at=Date.now(); preloadAvatars(rows); try{ localStorage.setItem('lb_cache',JSON.stringify({rows:rows.slice(0,500),at:LBC.at})); }catch(e){} if(boardOpen) renderBoard(rows,false); const me=rows.find(r=>r.id===PLAYER.id); if(me){ PLAYER.best=Math.max(PLAYER.best||0,me.best); savePlayer(); } return rows; })
+  LBC.loading = LB.range(0,500).then(rows=>{ rows=overlayMe(rows); LBC.rows=rows; LBC.at=Date.now(); preloadAvatars(rows); try{ localStorage.setItem('lb_cache',JSON.stringify({rows:rows.slice(0,500),at:LBC.at})); }catch(e){} if(boardOpen) renderBoard(rows,false); const me=rows.find(r=>r.id===PLAYER.id); if(me){ PLAYER.best=Math.max(PLAYER.best||0,me.best); savePlayer(); } return rows; })
     .catch(e=>{ console.warn(e); return LBC.rows; }).finally(()=>{ LBC.loading=null; });
   return LBC.loading;
+}
+// 排行榜每天 0 点才更新：今天自己破的纪录先在本机榜单里显示出来（别人明天才看得到）
+function overlayMe(rows){
+  if(!Array.isArray(rows)) return rows;
+  const best=PLAYER.best||0, i=rows.findIndex(x=>x.id===PLAYER.id);
+  if(!best || (i<0 && !PLAYER.profiled)) return rows;
+  if(i>=0 && rows[i].best>=best && rows[i].name===PLAYER.name && rows[i].avatar===PLAYER.avatar) return rows;
+  const me={ id:PLAYER.id, name:PLAYER.name, avatar:PLAYER.avatar, best:Math.max(best, i>=0?rows[i].best:0) };
+  const out=rows.filter(x=>x.id!==PLAYER.id);
+  if(out.length>=500 && me.best<=out[out.length-1].best) return rows;
+  const j=out.findIndex(x=>x.best<me.best); out.splice(j<0?out.length:j,0,me);
+  return out.slice(0,500);
 }
 // 按“分数高的在前，同分先达到的在前”排名；me 用指定分数放进去
 function localRank(rows, best, isNewRecord){
@@ -1002,6 +1017,7 @@ function openProfile(mode){
     $('pfSkip').textContent = mode==='first' ? '跳过' : '取消';
     $('pfName').value = PLAYER.profiled ? PLAYER.name : ''; $('pfName').placeholder = PLAYER.name;
     $('pfId').textContent = '我的 ID：'+PLAYER.id.slice(0,8);
+    const myBest=Math.max(PLAYER.best||0, getHistory()); $('pfBest').innerHTML = myBest ? `最好成绩<b>${myBest}</b>` : '还没有成绩，快去跳一局吧'; $('pfBest').style.display = mode==='first' ? 'none' : '';
     avatarFallback($('pfImg')); $('pfImg').src = safeAvatarSrc(PLAYER.avatar); $('pfErr').textContent='';
     requestAnimationFrame(()=>$('profileMask').classList.add('on'));
     const close=async(save)=>{
@@ -1077,8 +1093,16 @@ function openAccount(kind){
             if(r && r.error==='locked') return err(`输错太多次啦，${r.minutes||10} 分钟后再试`);
             if(r && r.error==='bad_password') return err(`密码不对哦，还可以试 ${r.left} 次`);
             return err(ACCT_ERR[r&&r.error] || '登录失败，稍后再试'); }
+          const oldId=PLAYER.id;
           Object.assign(PLAYER, { id:r.id, secret:ns, name:r.name, avatar:r.avatar||null, best:r.best||0, profiled:true, hasPw:true }); savePlayer();
-          meRankInfo=null; slowCache=null; LBC.at=0; refreshBoard(0); flushPending();
+          // 本机的“历史最高分”换成账号的（服务器已经把这台手机之前的临时成绩合并进去了）
+          try{ localStorage.setItem('history_score', String(Math.max(r.best||0, pendingScore||0))); }catch(e){}
+          // 本机缓存的榜单立刻改好：去掉临时身份那一行，账号那一行换成合并后的分数（服务器的榜单缓存要 1 分钟才更新）
+          if(LBC.rows){ let rows=LBC.rows.filter(x=>x.id!==oldId && x.id!==r.id);
+            const me={ id:r.id, name:r.name, avatar:r.avatar||null, best:r.best||0 };
+            if(rows.length<500 || me.best>rows[rows.length-1].best){ const i=rows.findIndex(x=>x.best<me.best); rows.splice(i<0?rows.length:i,0,me); }
+            LBC.rows=rows.slice(0,500); LBC.at=Date.now(); try{ localStorage.setItem('lb_cache',JSON.stringify({rows:LBC.rows,at:LBC.at})); }catch(e){} }
+          meRankInfo=null; slowCache=null; flushPending();
           done(true); ui.toast=Date.now(); ui.toastMsg='欢迎回来，'+r.name+'！';
         }
       }catch(e){ console.warn(e); err('网络不太好，稍后再试'); }
@@ -1112,7 +1136,7 @@ function renderBoard(all, animate){
 let meRankInfo=null;
 function renderMe(all){
   const box=$('bdMe'); box.innerHTML='';
-  if(meRankInfo && meRankInfo.total) $('bdSub').textContent=`共 ${meRankInfo.total} 位娘娘上榜 · 按最高分排名`;
+  if(meRankInfo && meRankInfo.total) $('bdSub').textContent=`共 ${meRankInfo.total} 位娘娘上榜 · 每天 0 点更新`;
   const i=(all||[]).findIndex(r=>r.id===PLAYER.id);
   if(i>=0 && i<100) return;                              // 已经在上面的列表里高亮了
   let rank=null, best=PLAYER.best||0;
