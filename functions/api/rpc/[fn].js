@@ -2,7 +2,7 @@
 // 国内（尤其微信里）直连 Supabase 经常失败，经由同域名的 Cloudflare 转发更稳。
 const SUPABASE = 'https://mltzilmrptwhuxbtktet.supabase.co';
 const KEY = 'sb_publishable_Y7mmTATlDdoSV-tPJ6vCTw_y9fbv6Bf';
-const ALLOWED = new Set(['submit_score', 'update_profile', 'name_available']);
+const ALLOWED = new Set(['submit_score', 'update_profile', 'name_available', 'set_password', 'login_account']);
 
 export async function onRequestPost(ctx) {
   const fn = String(ctx.params.fn || '');

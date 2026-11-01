@@ -1,5 +1,1 @@
-{
-  "version": 1,
-  "include": ["/api/board", "/api/rank", "/api/rpc/*", "/api/upload/*"],
-  "exclude": []
-}
+{"version": 1, "include": ["/api/board", "/api/rank", "/api/rpc/*", "/api/upload/*", "/api/realtime/*"], "exclude": []}
