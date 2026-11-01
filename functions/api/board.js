@@ -2,7 +2,7 @@
 // 玩家打开排行榜时先找离自己最近的 Cloudflare 节点；10 秒内的重复请求直接用缓存，不用每次都跑到 Supabase。
 const SUPABASE = 'https://mltzilmrptwhuxbtktet.supabase.co';
 const KEY = 'sb_publishable_Y7mmTATlDdoSV-tPJ6vCTw_y9fbv6Bf';   // 公开 key，本来就在网页里
-const TTL = 10;   // 秒
+const TTL = 60;   // 秒：浏览器和 Cloudflare 都缓存 1 分钟，1 分钟内重复打开不再计入额度
 
 let mem = null;   // 同一个节点内存里的缓存 { at, body }
 

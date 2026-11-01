@@ -48,6 +48,8 @@
   .room .slot.empty:before{content:"";width:48px;height:48px;border-radius:50%;border:2px dashed #cfe5cd;box-sizing:border-box}
   .room .busy{display:none;font-size:13px;color:#2f5f3f;margin-top:10px}
   .room .list{max-height:300px}
+  .room .steps{margin:6px 0 4px;font-size:14px;color:#2f5f3f}
+  .room .steps b{font-size:30px;color:#2fb265;margin:0 4px;vertical-align:-3px}
   @media (prefers-reduced-motion: reduce){ .mask,.mask .card,.mask.on .card{transition:opacity .15s} .item.in{animation:none} }
   .card{width:min(360px,100%);background:#f7fbf5;border-radius:28px;padding:26px 22px 20px;box-sizing:border-box;box-shadow:0 18px 50px rgba(10,40,20,.35);font-family:"PingFang SC","Microsoft YaHei",system-ui,sans-serif;color:#1f3d2b;text-align:center}
   .card h3{margin:0 0 4px;font-size:22px}
@@ -58,6 +60,12 @@
   .hint{font-size:12px;color:#8aa891;margin-bottom:16px}
   .card input[type=text]{width:100%;box-sizing:border-box;border:2px solid #cfe5cd;border-radius:16px;padding:12px 14px;font-size:17px;text-align:center;color:#1f3d2b;background:#fff;outline:none}
   .card input[type=text]:focus{border-color:#2fb265}
+  .card input[type=password]{width:100%;box-sizing:border-box;border:2px solid #cfe5cd;border-radius:16px;padding:12px 14px;font-size:17px;text-align:center;color:#1f3d2b;background:#fff;outline:none;margin-top:10px}
+  .card input[type=password]:focus{border-color:#2fb265}
+  #acName{margin-top:0}
+  .acct{margin-top:14px;font-size:13px;color:#8aa891}
+  .acct a{color:#2f8f55;text-decoration:underline;text-underline-offset:3px;cursor:pointer;padding:4px 6px}
+  .acct .on{color:#2f8f55;text-decoration:none}
   .row{display:flex;gap:10px;margin-top:18px}
   .btn{flex:1;border:0;border-radius:999px;padding:12px 0;font-size:16px;font-weight:600;cursor:pointer;font-family:inherit}
   .btn.main{background:#2fb265;color:#fff;box-shadow:0 4px 0 #23924f}
@@ -87,7 +95,16 @@
   <input type="text" id="pfName" maxlength="12" autocomplete="off">
   <div class="err" id="pfErr"></div>
   <div class="row"><button class="btn ghost" id="pfSkip">跳过</button><button class="btn main" id="pfOk">确定</button></div>
+  <div class="acct" id="pfAcct"><a id="pfPw">设置密码</a> · <a id="pfLogin">登录老账号</a></div>
   <input type="file" id="pfFile" accept="image/*" hidden>
+</div></div>
+<div class="mask" id="acctMask"><div class="card">
+  <h3 id="acTitle">设置密码</h3><p class="sub" id="acSub"></p>
+  <input type="text" id="acName" maxlength="16" autocomplete="username" placeholder="昵称">
+  <input type="password" id="acPw" maxlength="64" autocomplete="current-password" placeholder="密码（至少 6 位）">
+  <input type="password" id="acPw2" maxlength="64" autocomplete="new-password" placeholder="再输一次密码">
+  <div class="err" id="acErr"></div>
+  <div class="row"><button class="btn ghost" id="acCancel">取消</button><button class="btn main" id="acOk">确定</button></div>
 </div></div>
 <div class="mask" id="roomMask"><div class="card room">
   <div id="rmLobby">
@@ -106,7 +123,7 @@
     <div class="row"><button class="btn ghost" id="rmLeave">退出房间</button><button class="btn main" id="rmStart">开始游戏</button></div>
   </div>
   <div id="rmResult">
-    <h3 id="rmWinner"></h3><p class="sub">按坚持到最后的顺序排名</p>
+    <h3 id="rmWinner"></h3><div class="steps" id="rmSteps"></div><p class="sub">按坚持到最后的顺序排名</p>
     <div class="list" id="rmRank"></div>
     <div class="row"><button class="btn ghost" id="rmQuit">退出房间</button><button class="btn ghost" id="rmBack">返回房间</button></div>
     <div class="row" style="margin-top:8px"><button class="btn main" id="rmAgain">再来一局</button></div>
@@ -1009,7 +1026,64 @@ function openProfile(mode){
     $('pfAvatar').onclick=()=>$('pfFile').click();
     $('pfFile').onchange=async()=>{ const f=$('pfFile').files[0]; $('pfFile').value=''; if(!f) return;
       try{ pendingAvatar=await squareJpeg(f,112); $('pfImg').src=URL.createObjectURL(pendingAvatar); }catch(e){ $('pfErr').textContent='这张图片读不出来，换一张试试'; } };
+    // 账号：设置密码 / 登录老账号
+    $('pfAcct').style.display = LB.online ? '' : 'none';
+    $('pfPw').style.display = mode==='first' ? 'none' : '';
+    $('pfPw').nextSibling.textContent = mode==='first' ? '' : ' · ';
+    $('pfPw').textContent = PLAYER.hasPw ? '修改密码' : '设置密码';
+    $('pfLogin').textContent = mode==='first' ? '老玩家？登录账号找回成绩' : '登录老账号';
+    const sub = async(kind)=>{ $('profileMask').classList.remove('on');
+      const ok = await openAccount(kind);
+      if(ok && kind==='login'){ modalOpen=false; resolve(); return; }    // 登录成功：资料已经换成老账号的
+      modalOpen=true; $('pfPw').textContent = PLAYER.hasPw ? '修改密码' : '设置密码';
+      requestAnimationFrame(()=>$('profileMask').classList.add('on')); };
+    $('pfPw').onclick=()=>sub('set'); $('pfLogin').onclick=()=>sub('login');
     setTimeout(()=>$('pfName').focus(),50);
+  });
+}
+/* ---------- 账号：昵称 + 密码 ----------
+   设置密码：只能在自己的手机上设（要带上本机的身份密钥）。
+   登录：昵称 + 密码对了，服务器给这台手机登记一把新钥匙；这台手机之前的临时成绩会合并过去。 */
+const ACCT_ERR = { bad_password:'密码不对哦', no_account:'没有找到这个昵称，或者它还没设置密码',
+  not_found:'先玩完一局、成绩上榜后再设置密码吧', forbidden:'这台手机没有权限修改这个账号', bad_request:'出错了，再试一次吧' };
+function openAccount(kind){
+  return new Promise(resolve=>{
+    modalOpen=true; const set = kind==='set';
+    $('acTitle').textContent = set ? (PLAYER.hasPw?'修改密码':'设置密码') : '登录老账号';
+    $('acSub').textContent = set ? '设置后，换手机或清了缓存，用「昵称 + 密码」就能找回成绩' : '输入以前的昵称和密码，成绩、名次、头像都会回来';
+    $('acName').value = set ? PLAYER.name : ''; $('acName').readOnly = set; $('acName').style.opacity = set ? .6 : 1;
+    $('acPw').value=''; $('acPw2').value=''; $('acPw2').style.display = set ? '' : 'none'; $('acErr').textContent='';
+    $('acPw').autocomplete = set ? 'new-password' : 'current-password';
+    $('acOk').textContent = set ? '确定' : '登录'; $('acOk').disabled=false;
+    requestAnimationFrame(()=>$('acctMask').classList.add('on'));
+    const done = ok=>{ $('acctMask').classList.remove('on'); modalOpen=false; resolve(ok); };
+    $('acCancel').onclick = ()=>done(false);
+    $('acOk').onclick = async()=>{
+      const pw=$('acPw').value, err=m=>{ $('acErr').textContent=m; $('acOk').disabled=false; };
+      if(pw.length<6) return err('密码至少 6 位');
+      if(set && pw!==$('acPw2').value) return err('两次输入的密码不一样');
+      const name=$('acName').value.trim(); if(!set && !name) return err('先输入昵称');
+      $('acOk').disabled=true; $('acErr').textContent='';
+      try{
+        if(set){
+          if(pendingScore) await flushPending();     // 还没上榜的成绩先传上去，保证服务器上有这个人
+          const r = await LB.rpc('set_password',{ p_id:PLAYER.id, p_secret:PLAYER.secret, p_password:pw });
+          if(!r || !r.ok) return err(ACCT_ERR[r&&r.error] || '设置失败，稍后再试');
+          PLAYER.hasPw=true; savePlayer(); done(true); ui.toast=Date.now(); ui.toastMsg='密码设置好啦，记住你的昵称和密码哦';
+        } else {
+          const ns = rid()+rid();
+          const r = await LB.rpc('login_account',{ p_name:name, p_password:pw, p_new_secret:ns, p_old_id:PLAYER.id, p_old_secret:PLAYER.secret });
+          if(!r || !r.ok){
+            if(r && r.error==='locked') return err(`输错太多次啦，${r.minutes||10} 分钟后再试`);
+            if(r && r.error==='bad_password') return err(`密码不对哦，还可以试 ${r.left} 次`);
+            return err(ACCT_ERR[r&&r.error] || '登录失败，稍后再试'); }
+          Object.assign(PLAYER, { id:r.id, secret:ns, name:r.name, avatar:r.avatar||null, best:r.best||0, profiled:true, hasPw:true }); savePlayer();
+          meRankInfo=null; slowCache=null; LBC.at=0; refreshBoard(0); flushPending();
+          done(true); ui.toast=Date.now(); ui.toastMsg='欢迎回来，'+r.name+'！';
+        }
+      }catch(e){ console.warn(e); err('网络不太好，稍后再试'); }
+    };
+    setTimeout(()=>(set?$('acPw'):$('acName')).focus(),50);
   });
 }
 // 把图片裁成正方形并压缩，头像小而清晰
@@ -1218,7 +1292,7 @@ function handle(p){
   }
 }
 function startRoomGame(p){
-  ROOM.playing=true; ROOM.order=p.order.slice(); ROOM.alive=p.order.slice(); ROOM.out=[]; ROOM.stats={};
+  ROOM.playing=true; ROOM.order=p.order.slice(); ROOM.alive=p.order.slice(); ROOM.out=[]; ROOM.stats={}; ROOM.steps=0;
   for(const id of p.order) ROOM.stats[id]=0;
   if(p.names) Object.assign(ROOM.names,p.names); if(p.avatars) Object.assign(ROOM.avatars,p.avatars);
   rand = seeded(p.seed);
@@ -1267,7 +1341,7 @@ async function roomJump(p){
   boxTouchEnd(under); hero.bodyAngle=0;
   const { score, node } = await jumpByPosition(p.tx, p.ty, p.vx, topH(target));
   let ok=false;
-  if(node===target && score>0){ ok=true; playScore(score); heroJumpEndEffect(); ROOM.stats[p.by]=(ROOM.stats[p.by]||0)+1; nextBox(); move(); }
+  if(node===target && score>0){ ok=true; playScore(score); heroJumpEndEffect(); ROOM.stats[p.by]=(ROOM.stats[p.by]||0)+1; ROOM.steps=(ROOM.steps||0)+1; nextBox(); move(); }
   else if(node===under && score>0){ ok=true; }                       // 没跳远，还站在原来的方块上：算安全
   else { playScore(0); if(node && score===-1) heroSlip(node); else heroMiss(target, under); }
   stepClear();
@@ -1296,6 +1370,7 @@ function roomGone(id){   // 掉线
 function endRoomGame(){
   ROOM.playing=false; G.state=6; ROOM.cur=null; rand=Math.random;
   const ranking = ROOM.alive.concat(ROOM.out.slice().reverse());   // 活到最后的排第一，越早掉越靠后
+  ROOM.resultSteps = ROOM.steps||0;
   ROOM.result = ranking.map(id=>({ id, name:ROOM.names[id]||'?', avatar:ROOM.avatars[id], jumps:ROOM.stats[id]||0 }));
   if(isHost()) track({ playing:false });
   setTimeout(()=>{ ROOM.view='result'; openRoomUI(); renderRoom(); playOne('score_more'); }, 600);
@@ -1340,6 +1415,10 @@ function drawRoomHUD(){
     text(me ? '轮到你啦！按住蓄力' : `轮到 ${ellipsis(ROOM.names[ROOM.cur]||'', 300, 26)}`, 0, top-190, 28, me?THEME.green:THEME.btnText);
     text(`还剩 ${ROOM.alive.length} 人`, 0, top-228, 20, '#6f8f78');
   }
+  // 总步数：大家一起跳了多少步（和单人模式的分数同一个位置风格）
+  if(ROOM.playing){ const sx=-Math.min(VW/2,450)+80;
+    drawDigits(String(ROOM.steps||0),F.digitsColorBlack,sx,top-262,56,0.5);
+    text('总步数',sx,top-306,18,'#6f8f78'); }
   if(ROOM.toast && performance.now()-ROOM.toastAt<1800){
     const a=Math.min(1,(1800-(performance.now()-ROOM.toastAt))/300);
     ctx.globalAlpha=a; ctx.fillStyle='rgba(31,61,43,0.82)'; rrect(-170,-(top-290)-24,340,48,24); ctx.fill();
@@ -1383,6 +1462,7 @@ function renderRoom(){
     $('rmResult').style.display='block';
     const r=ROOM.result||[], w=r[0];
     $('rmWinner').textContent = w ? `${w.name} 获胜！` : '游戏结束';
+    $('rmSteps').innerHTML = `大家一共跳了<b>${ROOM.resultSteps||0}</b>步`;
     const l=$('rmRank'); l.innerHTML='';
     r.forEach((x,i)=>{ const d=document.createElement('div'); d.className='item'+(x.id===PLAYER.id?' me':'');
       const no=document.createElement('span'); no.className='no'+(i<3?' g'+(i+1):''); no.textContent=i+1;
