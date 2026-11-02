@@ -195,9 +195,9 @@ const LB = {
     try{ const r=await this.edge('/api/rank?id='+PLAYER.id,{},6000); if(r) return r.data; }catch(e){}
     return null; },
   // 提交本局分数（只保留最高分），返回 {best, rank, prev_rank, total}
-  async submit(score){
-    if(!this.online) return localLB.submit(score);
-    return this.rpc('submit_score',{ p_id:PLAYER.id, p_secret:PLAYER.secret, p_name:PLAYER.name, p_avatar:PLAYER.avatar, p_score:score });
+  async submit(run){
+    if(!this.online) return localLB.submit(run.score);
+    return this.rpc('submit_score',{ p_id:PLAYER.id, p_secret:PLAYER.secret, p_name:PLAYER.name, p_avatar:PLAYER.avatar, p_score:run.score, p_log:run.log, p_ms:Math.round(run.ms) });
   },
   async saveProfile(){
     if(!this.online) return localLB.saveProfile();
@@ -375,8 +375,13 @@ async function seq(obj, steps){ for(const [d,to] of steps) await tweenProps(obj,
 /* ---------- 游戏数据 (GameData) ---------- */
 // 0=没开始,1=游戏中,2=按下,3=弹起,4=结束,-1=自动演示
 const G = { state:0, total:0, step:0 };
+/* 本局记录：每一跳的结果（1=普通落地，2=跳中中心，e=彩蛋）。交分数时一起交给服务器重算，防止直接改分数 */
+const RUN={ log:'', t0:0 };
+function runReset(){ RUN.log=''; RUN.t0=Date.now(); }
+function scoreFromLog(log){ let step=0,t=0; for(const c of log){ if(c==='1'){ step=1; t+=1; } else if(c==='2'){ if(!step) step=1; step*=2; t+=step; } else if(c==='e') t+=17; } return t; }
 function computedStepScore(s){
   if(s==0||s==-1){ G.step=0; return s; }
+  if(G.state!==-1 && !ROOM.playing) RUN.log += s==1 ? '1' : '2';
   if(s==1){ G.step=1; G.total+=1; return 1; }
   if(G.step==0) G.step=1;
   G.step*=s; G.total+=G.step; return G.step;
@@ -532,7 +537,7 @@ const EGG_BOX='myc1', EGG_TIME=3, EGG_SCORE=17;
 function eggTick(dt){
   const b=hero&&hero.onBox; if(G.state!==1 || !b || b.def.b!==EGG_BOX || b.egg || hero.air) return;
   b.stay=(b.stay||0)+dt;
-  if(b.stay>=EGG_TIME){ b.egg=true; G.total+=EGG_SCORE; recordHistory(); heroShowScore(EGG_SCORE); playOne('score_more');
+  if(b.stay>=EGG_TIME){ b.egg=true; G.total+=EGG_SCORE; RUN.log+='e'; recordHistory(); heroShowScore(EGG_SCORE); playOne('score_more');
     b.flash=1; tweenProps(b,1.2,{flash:0}); }
 }
 function touchStart(){
@@ -587,7 +592,8 @@ function heroMiss(target, original){
   // 踏空：一直掉到地面上
   tw(0.5,(r=>{ const y0=hero.y,E0=hero.E; return q=>{ hero.y=y0-E0*q; hero.E=E0*(1-q); }; })(),quadIn);
 }
-function gameOver(){ G.state=4; const score=G.total; afterGame(score); setTimeout(()=>{ ui.page='over'; },500); }
+function gameOver(){ G.state=4; const run={ score:scoreFromLog(RUN.log), log:RUN.log, ms:Date.now()-RUN.t0 }; G.total=run.score; lastRun=run; afterGame(run.score); setTimeout(()=>{ ui.page='over'; },500); }
+let lastRun=null;
 let rankState = { status:'idle' };
 /* ---------- 排行榜本地缓存：提前把榜单拉下来，结算时立刻在本机算出名次并播放动画，上传在后台进行 ---------- */
 const LBC = { rows:null, at:0, loading:null };
@@ -639,9 +645,9 @@ async function afterGame(score){
   LBC.rows = list;                                          // 本机先更新，下次结算也快
   // 后台上传：只有破纪录、第一次上榜或改过资料时才需要
   if(improved || !meRow || meRow.name!==PLAYER.name || meRow.avatar!==PLAYER.avatar){
-    setPending(Math.max(pendingScore||0,score));   // 先记下，上传成功再清掉（中途关掉微信也不会丢）
-    submitWithRetry(score).then(r=>{ if(pendingScore<=score) setPending(0); if(r && r.rank) correctRank(score, r.rank, r.best); })   // 本机榜单已经更新过，不用再整份重拉
-      .catch(e=>{ console.warn(e); if(rankState.score===score) rankState.note='网络不太好，成绩还没传上去，下次打开会自动补传'; setPending(Math.max(pendingScore||0,score)); });
+    const run=lastRun; keepPending(run);   // 先记下，上传成功再清掉（中途关掉微信也不会丢）
+    submitWithRetry(run).then(r=>{ if(pendingRun===run) setPending(0); if(r && r.rank) correctRank(score, r.rank, r.best); })   // 本机榜单已经更新过，不用再整份重拉
+      .catch(e=>{ console.warn(e); if(rankState.score===score) rankState.note='网络不太好，成绩还没传上去，下次打开会自动补传'; });
   } else if(Date.now()-LBC.at>300000){
     // 没破纪录不用上传；本机榜单超过 5 分钟才重新拉一份核对名次
     refreshBoard(300000).then(rows=>{ if(!rows || rankState.score!==score) return; const i=rows.findIndex(x=>x.id===PLAYER.id); if(i>=0) correctRank(score, i+1, rows[i].best); });
@@ -665,26 +671,32 @@ async function correctRank(score, rank, best){
     fromSlot: animating ? Math.min(n, Math.max(toSlot, rankState.prevRank-1-start)) : toSlot,
     prevRank: Math.max(start+toSlot+1, rankState.prevRank) });
 }
-let pendingScore=0; try{ pendingScore=+localStorage.getItem('pending_score')||0; }catch(e){}
-function setPending(v){ pendingScore=v; try{ v?localStorage.setItem('pending_score',String(v)):localStorage.removeItem('pending_score'); }catch(e){} }
+// 还没传上去的那一局（连同每一跳的记录），存在手机里，下次打开自动补传
+let pendingRun=null, pendingScore=0;
+try{ const p=JSON.parse(localStorage.getItem('pending_run')||'null'); if(p && typeof p.log==='string'){ pendingRun=p; pendingScore=p.score; } localStorage.removeItem('pending_score'); }catch(e){}
+function setPending(run){ pendingRun=run||null; pendingScore=run?run.score:0; try{ run?localStorage.setItem('pending_run',JSON.stringify(run)):localStorage.removeItem('pending_run'); }catch(e){} }
+function keepPending(run){ if(run && run.score>=pendingScore) setPending(run); }   // 只留分数最高的那一局
 let flushing=false;
 async function flushPending(){
-  if(!pendingScore || flushing || !LB.online) return; flushing=true; const sc=pendingScore;
-  try{ await submitWithRetry(sc); if(pendingScore===sc) setPending(0); }catch(e){ console.warn('补传失败',e); }
+  if(!pendingRun || flushing || !LB.online) return; flushing=true; const run=pendingRun;
+  try{ await submitWithRetry(run); if(pendingRun===run) setPending(0); }catch(e){ console.warn('补传失败',e); }
   flushing=false; }
 addEventListener('online', ()=>flushPending());
-async function submitWithRetry(score){
-  try{ return await LB.submit(score); }
-  catch(e){ if(!String(e.message).includes('name_taken')) throw e;
-    PLAYER.name='用户'+String(Math.floor(10000+Math.random()*90000)); savePlayer(); return await LB.submit(score); }
+async function submitWithRetry(run){
+  try{ return await LB.submit(run); }
+  catch(e){ const m=String(e.message);
+    if(/bad_run|bad score/.test(m)){ if(pendingRun===run) setPending(0); throw e; }   // 服务器认定这局不合理：不再重试
+    if(!m.includes('name_taken')) throw e;
+    PLAYER.name='用户'+String(Math.floor(10000+Math.random()*90000)); savePlayer(); return await LB.submit(run); }
 }
 let slowCache=null;   // 500 名以外的玩家：上一次查到的名次附近 5 人，10 分钟内没破纪录就直接用，不再去服务器
 async function afterGameSlow(score){
   if(slowCache && Date.now()-slowCache.at<600000 && PLAYER.best>0 && score<=PLAYER.best && !pendingScore){
     const st=slowCache.state; rankState={ ...st, score, improved:false, prevRank:st.newRank, fromSlot:st.toSlot, t:1, glow:0 }; return; }
-  if(score>(PLAYER.best||0) || !PLAYER.best) setPending(Math.max(pendingScore||0,score));   // 先记下，传上去再清掉
+  const run=lastRun;
+  if(score>(PLAYER.best||0) || !PLAYER.best) keepPending(run);   // 先记下，传上去再清掉
   let r;
-  try{ r = await submitWithRetry(score); if(pendingScore<=score) setPending(0); PLAYER.best=Math.max(PLAYER.best||0,r.best); savePlayer(); }
+  try{ r = await submitWithRetry(run); if(pendingRun===run) setPending(0); PLAYER.best=Math.max(PLAYER.best||0,r.best); savePlayer(); }
   catch(e){ console.warn(e); rankState = { status:'error', msg: LB.online?'网络不太好，成绩还没传上去，下次打开会自动补传':'' }; return; }
   try{
     const n=5, newRank=r.rank, prevRank=Math.max(newRank, r.prev_rank||newRank);
@@ -713,7 +725,7 @@ function applySkin(i){ const sk=SKINS[i]; if(!sk||sk.locked) return; skinIdx=i; 
   try{ localStorage.setItem('skin',String(i)); }catch(e){} }
 function goHome(){ ui.page='home'; G.total=0; G.step=0; ROOM.result=null; rand=Math.random; runGame(-1); }
 function startGame(){
-  G.state=0; G.total=0; G.step=0; ui.page=null;
+  G.state=0; G.total=0; G.step=0; ui.page=null; runReset();
   flushPending();
   runGame(1);
 }

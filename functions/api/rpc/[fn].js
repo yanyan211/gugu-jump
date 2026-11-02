@@ -8,7 +8,7 @@ export async function onRequestPost(ctx) {
   const fn = String(ctx.params.fn || '');
   if (!ALLOWED.has(fn)) return new Response('not found', { status: 404 });
   const body = await ctx.request.text();
-  if (body.length > 4096) return new Response('too large', { status: 413 });
+  if (body.length > 8192) return new Response('too large', { status: 413 });
   const up = await fetch(`${SUPABASE}/rest/v1/rpc/${fn}`, {
     method: 'POST', body,
     headers: { apikey: KEY, 'content-type': 'application/json' },
