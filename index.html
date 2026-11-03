@@ -117,10 +117,16 @@
     <input type="text" class="code" id="rmInput" inputmode="numeric" maxlength="5" placeholder="5 位数字" autocomplete="off">
     <div class="row"><button class="btn main" id="rmJoin">加入房间</button></div>
   </div>
+  <div id="rmMatching" style="display:none">
+    <h3>🎲 随机匹配</h3>
+    <p class="sub">正在帮你找一起跳的小伙伴<br>凑齐 2~6 人就自动开始</p>
+    <div class="row"><button class="btn ghost" id="rmMatchCancel">取消匹配</button></div>
+  </div>
   <div id="rmWait">
-    <p class="sub" style="margin:0">房间号</p>
+    <p class="sub" id="rmCodeLabel" style="margin:0">房间号</p>
     <div class="codebox"><div class="big" id="rmCode"></div><button class="mini" id="rmCopy">复制</button></div>
-    <p class="sub" style="margin:2px 0 0">把房间号发给好友，输入就能加入 · <span id="rmCount"></span></p>
+    <p class="sub" id="rmWaitTip" style="margin:2px 0 0">把房间号发给好友，输入就能加入 · <span id="rmCount"></span></p>
+    <p class="sub" id="rmMatchInfo" style="display:none;margin:4px 0 0;color:#0a8a64"></p>
     <div class="grid" id="rmMembers"></div>
     <p class="sub" id="rmWaitHost">等房主开始游戏…</p>
     <div class="row"><button class="btn ghost" id="rmLeave">退出房间</button><button class="btn main" id="rmStart">开始游戏</button></div>
@@ -942,12 +948,13 @@ function drawHome(){
   // 左右切换
   circleBtn(-268,cy+5,36,-1,()=>homeSwitch(-1)); circleBtn(268,cy+5,36,1,()=>homeSwitch(1));
   // 开始 / 排行
-  button('btn_start',0,-260,300,100,'开始游戏',40,'#000',19.952,()=>{ if(SKINS[home.view].locked){ ui.toast=Date.now(); ui.toastMsg='这个皮肤还没有上线哦'; } else startGame(); });
-  rankLink(-95,-370); roomLink(105,-370);
+  button('btn_start',0,-190,300,88,'随机匹配',40,'#000',19.952,()=>enterMatch());
+  button('btn_start',0,-312,300,88,'开始游戏',40,'#000',19.952,()=>{ if(SKINS[home.view].locked){ ui.toast=Date.now(); ui.toastMsg='这个皮肤还没有上线哦'; } else startGame(); });
+  rankLink(-95,-420); roomLink(105,-420);
   // 右上角：个人中心
   { const x=Math.min(VW/2,450)-56, y=Math.min(VH/2,760)-BANNER_H-46; drawAvatar(PLAYER.avatar,x,y,32); ctx.strokeStyle='#fff'; ctx.lineWidth=4; ctx.beginPath(); ctx.arc(x,-y,32,0,7); ctx.stroke();
     text('我的',x,y-50,18,THEME.btnText); ui.btns.push({x:x-40,y:y-66,w:80,h:104,onClick:()=>openProfile('edit')}); }
-  if(ui.toast && Date.now()-ui.toast<1500) text(ui.toastMsg||'',0,-440,24,THEME.btnText);
+  if(ui.toast && Date.now()-ui.toast<1500) text(ui.toastMsg||'',0,-475,24,THEME.btnText);
 }
 function roomLink(x,y){ // 主页：好友房间入口
   ctx.strokeStyle=THEME.btnText; ctx.lineWidth=2.2;
@@ -1182,7 +1189,8 @@ async function openBoard(){
    - 游戏消息：broadcast，每一跳只传「谁跳、跳到哪」，动画在每台手机本地播放
    - 方块序列：开局时房主发一个随机种子，所有人用同一个种子生成同样的方块
    ===================================================================== */
-const ROOM_MAX = 10, TURN_TIME = 10;          // 每人每次操作限时（秒）
+const ROOM_MAX = 10, TURN_TIME = 10;
+const MATCH_CODES = ['81001','81002','81003','81004','81005','81006'], MATCH_MAX = 6, MATCH_GATHER_MS = 10000;   // 随机匹配池 / 每局上限 / 凑人倒计时          // 每人每次操作限时（秒）
 let rand = Math.random;                        // 方块随机数：单人模式用系统随机，房间模式用种子随机
 function seeded(seed){ let a = seed>>>0; return ()=>{ a|=0; a=a+0x6D2B79F5|0; let t=Math.imul(a^a>>>15,1|a); t=t+Math.imul(t^t>>>7,61|t)^t; return ((t^t>>>14)>>>0)/4294967296; }; }
 
@@ -1191,6 +1199,7 @@ const ROOM = {
   playing:false, order:[], alive:[], out:[], stats:{}, names:{}, avatars:{},
   turn:0, cur:null, turnStart:0, busy:false, pressed:false, remoteCharge:false,
   view:'lobby', toast:'', toastAt:0, hostWasMe:false,
+  match:false, matchAuto:false, matchUntil:0,
 };
 const isHost = ()=> ROOM.members.length && ROOM.members[0].id===PLAYER.id;
 const myTurn = ()=> ROOM.playing && ROOM.cur===PLAYER.id && !ROOM.busy;
@@ -1247,6 +1256,7 @@ function onPresence(ch){
   if(ch!==ROOM.ch) return;
   const before = ROOM.members.map(m=>m.id);
   ROOM.members = presenceList(ch);
+  if(ROOM.match){ const h=ROOM.members[0]; if(h && h.matchUntil) ROOM.matchUntil=h.matchUntil; }
   for(const m of ROOM.members){ ROOM.names[m.id]=m.name; ROOM.avatars[m.id]=m.avatar; }
   // 后来的人超过 10 人：自己退出
   const idx = ROOM.members.findIndex(m=>m.id===PLAYER.id);
@@ -1281,7 +1291,7 @@ async function createRoom(){
     const ch = await openChannelAny(code, 1500);   // 新房间号：等 1.5 秒确认没人在用
     if(!ch){ setRoomBusy(''); roomError('连接失败了，网络可能不太好，再试一次吧'); return; }
     if(presenceList(ch).filter(m=>m.id!==PLAYER.id).length){ ch.unsubscribe(); continue; }   // 这个号已经有人在用，换一个
-    ROOM.ch=ch; ROOM.code=code; ROOM.joinedAt=Date.now(); await track();
+    ROOM.ch=ch; ROOM.code=code; ROOM.joinedAt=Date.now(); ROOM.match=false; ROOM.matchAuto=false; ROOM.matchUntil=0; await track();
     ROOM.view='wait'; setRoomBusy(''); renderRoom(); return;
   }
   setRoomBusy(''); roomError('创建失败了，再试一次吧');
@@ -1305,18 +1315,72 @@ async function joinRoom(code){
 async function finishJoin(ch, code, list, fail){
   if(list.some(m=>m.playing)) return fail('这局已经开始了，等他们玩完再进来吧');
   if(list.length>=ROOM_MAX) return fail('房间满啦，换一个房间吧');
-  ROOM.ch=ch; ROOM.code=code; ROOM.joinedAt=Date.now(); await track();
+  ROOM.ch=ch; ROOM.code=code; ROOM.joinedAt=Date.now(); ROOM.match=false; ROOM.matchAuto=false; ROOM.matchUntil=0; await track();
   ROOM.view='wait'; setRoomBusy(''); renderRoom();
 }
 function leaveRoom(msg){
   try{ ROOM.ch && ROOM.ch.unsubscribe(); }catch(e){}
   for(const k in (ROOM.clients||{})) rtDrop(k);
-  Object.assign(ROOM,{ client:null, ch:null, code:'', joinedAt:0, members:[], playing:false, busy:false, pressed:false, remoteCharge:false, view:'lobby', hostWasMe:false });
+  Object.assign(ROOM,{ client:null, ch:null, code:'', joinedAt:0, members:[], playing:false, busy:false, pressed:false, remoteCharge:false, view:'lobby', hostWasMe:false, match:false, matchAuto:false, matchUntil:0 });
   rand=Math.random; stopSnd();
   if(msg){ ROOM.view='lobby'; renderRoom(); roomError(msg); }
   else closeRoomUI();
   goHome();
 }
+
+
+/* ---------- 随机匹配（简易版：公共池 + 房主自动开始） ---------- */
+let MATCH_ABORT=false;
+async function matchRoom(){
+  setRoomBusy('正在为你匹配小伙伴…');
+  let anyOpen=false;
+  for(const code of MATCH_CODES){
+    if(MATCH_ABORT) { setRoomBusy(''); return; }
+    const ch = await openChannelAny(code, 1500);
+    if(MATCH_ABORT){ if(ch){ try{ ch.unsubscribe(); }catch(e){} } setRoomBusy(''); return; }
+    if(!ch) continue;
+    anyOpen=true;
+    let list = presenceList(ch).filter(m=>m.id!==PLAYER.id);
+    if(!list.length){
+      // 刚有人占房时正式名单要慢半拍：等最多 2.5 秒看清楚再决定自己是不是房主
+      for(let k=0;k<25 && !presenceList(ch).filter(m=>m.id!==PLAYER.id).length;k++) await new Promise(r=>setTimeout(r,100));
+      list = presenceList(ch).filter(m=>m.id!==PLAYER.id);
+    }
+    if(MATCH_ABORT){ try{ ch.unsubscribe(); }catch(e){} setRoomBusy(''); return; }
+    if(list.length && (!list.some(m=>m.match) || list.some(m=>m.playing) || list.length>=MATCH_MAX)){
+      try{ ch.unsubscribe(); }catch(e){}
+      continue;   // 私有房占了这个号 / 这局已开始 / 这间匹配房满了：换下一间
+    }
+    ROOM.ch=ch; ROOM.code=code; ROOM.joinedAt=Date.now(); ROOM.match=true; ROOM.matchAuto=true;
+    ROOM.matchUntil = list.length ? (list[0].matchUntil||0) : 0;
+    await track({ match:true });
+    if(MATCH_ABORT){ leaveRoom(); return; }   // 占房瞬间用户取消了：立刻退出，别把人带进房
+    ROOM.view='wait'; setRoomBusy(''); renderRoom(); return;
+  }
+  if(MATCH_ABORT){ setRoomBusy(''); return; }
+  ROOM.view='matching'; renderRoom();
+  setRoomBusy(''); roomError(anyOpen ? '匹配的人有点多，房间都满啦，过一会儿再试试' : '连接失败了，网络可能不太好，再试一次吧');
+}
+function enterMatch(){ if(ROOM.ch){ openRoom(); return; } MATCH_ABORT=false; roomError(''); ROOM.view='matching'; renderRoom(); openRoomUI(); matchRoom(); }   // 首页入口：直接显示「随机匹配中」，不经过好友房大厅
+// 匹配房主自动开始：满 6 人立即开始；2 人以上起 10 秒倒计时，期间人走了就取消
+setInterval(()=>{
+  if(!ROOM.ch || !ROOM.match || ROOM.playing || ROOM.view!=='wait') return;
+  const n=ROOM.members.length;
+  if(isHost() && ROOM.matchAuto){
+    if(n>=MATCH_MAX){ ROOM.matchUntil=0; hostStart(); return; }
+    if(n>=2){
+      if(!ROOM.matchUntil){ ROOM.matchUntil=Date.now()+MATCH_GATHER_MS; track({ matchUntil:ROOM.matchUntil }); }
+      else if(Date.now()>=ROOM.matchUntil){ ROOM.matchUntil=0; hostStart(); return; }
+    } else if(ROOM.matchUntil){ ROOM.matchUntil=0; track({ matchUntil:0 }); }
+  }
+  const mi=$('rmMatchInfo');
+  if(mi && $('rmWait').style.display!=='none'){
+    mi.style.display='block';
+    if(n<2) mi.textContent='🎲 随机匹配房 · 正在等其他玩家加入，你也可以先退出去玩单人';
+    else if(ROOM.matchUntil){ const s=Math.max(0,Math.ceil((ROOM.matchUntil-Date.now())/1000)); mi.textContent=`🎲 随机匹配房 · 已有 ${n} 人，${s} 秒后自动开始，满 6 人提前开始`; }
+    else mi.textContent=`🎲 随机匹配房 · 已有 ${n} 人，等房主自动开始…`;
+  }
+}, 500);
 
 /* ---------- 消息处理（所有人都执行同一套） ---------- */
 function handle(p){
@@ -1329,7 +1393,7 @@ function handle(p){
   }
 }
 function startRoomGame(p){
-  ROOM.playing=true; ROOM.order=p.order.slice(); ROOM.alive=p.order.slice(); ROOM.out=[]; ROOM.stats={}; ROOM.steps=0;
+  ROOM.playing=true; ROOM.matchAuto=false; ROOM.order=p.order.slice(); ROOM.alive=p.order.slice(); ROOM.out=[]; ROOM.stats={}; ROOM.steps=0;
   for(const id of p.order) ROOM.stats[id]=0;
   if(p.names) Object.assign(ROOM.names,p.names); if(p.avatars) Object.assign(ROOM.avatars,p.avatars);
   rand = seeded(p.seed);
@@ -1472,15 +1536,21 @@ function confirmLeave(){ return !ROOM.playing || window.confirm('现在退出就
 function openRoomUI(){ modalOpen=true; requestAnimationFrame(()=>$('roomMask').classList.add('on')); }
 function closeRoomUI(){ $('roomMask').classList.remove('on'); modalOpen=false; }
 function roomError(msg){ $('rmErr').textContent=msg||''; }
-function setRoomBusy(msg){ $('rmBusy').textContent=msg; $('rmBusy').style.display=msg?'block':'none'; document.querySelectorAll('#roomMask button').forEach(b=>b.disabled=!!msg); }
+function setRoomBusy(msg){ $('rmBusy').textContent=msg; $('rmBusy').style.display=msg?'block':'none'; document.querySelectorAll('#roomMask button').forEach(b=>{ if(b.id!=='rmMatchCancel') b.disabled=!!msg; }); }
 function openRoom(){ ROOM.view = ROOM.ch ? 'wait' : 'lobby'; roomError(''); renderRoom(); openRoomUI(); }
 function renderRoom(){
-  const v=ROOM.view; ['rmLobby','rmWait','rmResult'].forEach(id=>$(id).style.display='none');
+  const v=ROOM.view; ['rmLobby','rmWait','rmResult','rmMatching'].forEach(id=>$(id).style.display='none');
+  if(v==='matching'){ $('rmMatching').style.display='block'; $('rmClose').style.display='none'; return; }
   $('rmClose').style.display = v==='lobby' ? 'block' : 'none';
   if(v==='lobby'){ $('rmLobby').style.display='block'; return; }
   if(v==='wait'){
     $('rmWait').style.display='block';
-    $('rmCode').textContent=ROOM.code;
+    $('rmCode').textContent = ROOM.match ? '随机匹配房' : ROOM.code;
+    $('rmCode').style.fontSize = ROOM.match ? '36px' : '';
+    $('rmCode').style.letterSpacing = ROOM.match ? '2px' : '';
+    $('rmCopy').style.display = ROOM.match ? 'none' : '';
+    const cl=$('rmCodeLabel'); if(cl) cl.style.display = ROOM.match ? 'none' : '';
+    const wt=$('rmWaitTip'); if(wt && wt.childNodes[0]) wt.childNodes[0].textContent = ROOM.match ? '随机匹配 · ' : '把房间号发给好友，输入就能加入 · ';
     const g=$('rmMembers'); g.innerHTML='';
     for(let i=0;i<ROOM_MAX;i++){
       const m=ROOM.members[i], d=document.createElement('div'); d.className='slot'+(m?'':' empty');
@@ -1490,6 +1560,7 @@ function renderRoom(){
       g.append(d);
     }
     $('rmCount').textContent=`${ROOM.members.length} / ${ROOM_MAX}`;
+    const mi=$('rmMatchInfo'); if(mi){ mi.style.display=ROOM.match?'block':'none'; if(ROOM.match) mi.textContent = ROOM.members.length<2 ? '🎲 随机匹配房 · 正在等其他玩家加入…' : '🎲 随机匹配房 · 人齐啦，马上开始…'; }
     const host=isHost(); $('rmStart').style.display=host?'block':'none'; $('rmWaitHost').style.display=host?'none':'block';
     $('rmStart').disabled = ROOM.members.length<2;
     $('rmStart').textContent = ROOM.members.length<2 ? '至少 2 人才能开始' : '开始游戏';
@@ -1523,6 +1594,7 @@ function bindRoomUI(){
   $('rmInput').oninput=()=>{ $('rmInput').value=$('rmInput').value.replace(/\D/g,'').slice(0,5); };
   $('rmInput').onkeydown=e=>{ if(e.key==='Enter') $('rmJoin').click(); };
   $('rmClose').onclick=()=>closeRoomUI();
+  $('rmMatchCancel').onclick=()=>{ MATCH_ABORT=true; setRoomBusy(''); roomError(''); closeRoomUI(); };
   $('rmStart').onclick=()=>hostStart();
   $('rmLeave').onclick=()=>leaveRoom();
   $('rmCopy').onclick=()=>{ try{ navigator.clipboard.writeText(ROOM.code); $('rmCopy').textContent='已复制'; setTimeout(()=>$('rmCopy').textContent='复制',1200); }catch(e){} };
