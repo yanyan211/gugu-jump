@@ -158,6 +158,7 @@ let skinIdx = 0;
 
 /* ---------- 排行榜配置：填入 Supabase 项目的 URL 和 anon key 后就会连上线上总榜；留空则只在本机记录 ---------- */
 const LB_CONFIG = { url: 'https://mltzilmrptwhuxbtktet.supabase.co', key: 'sb_publishable_Y7mmTATlDdoSV-tPJ6vCTw_y9fbv6Bf' };
+const EDGE_BASE = 'https://api.cino1018.com';   // 自建中转（香港服务器），替代 Cloudflare 函数
 
 /* ---------- 玩家资料（存在本机浏览器里，只需第一次填写） ---------- */
 function rid(){ try{ return crypto.randomUUID(); }catch(e){ return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g,c=>{const r=Math.random()*16|0;return (c=='x'?r:(r&3|8)).toString(16);}); } }
@@ -177,7 +178,7 @@ const LB = {
   async edge(path, opt, ms=9000){   // 经 Cloudflare 转发；只有网络层失败才返回 null（让调用方改直连），服务器返回的错误照常抛出
     if(!EDGE.on) return null;
     const ctl=new AbortController(), tm=setTimeout(()=>ctl.abort(),ms);
-    let r; try{ r=await fetch(path,{...opt,signal:ctl.signal}); }catch(e){ return null; } finally{ clearTimeout(tm); }
+    let r; try{ r=await fetch(EDGE_BASE+path,{...opt,signal:ctl.signal}); }catch(e){ return null; } finally{ clearTimeout(tm); }
     const t=await r.text();
     // Cloudflare 这边出问题（额度用完、还没部署、返回了网页而不是数据）：这次会话改为直连 Supabase
     const isJson = !t || /^\s*[\[{"0-9tfn]/.test(t);
@@ -214,7 +215,7 @@ const LB = {
     if(EDGE.on && offset>0){ try{ const r=await this.edge(`/api/board?offset=${offset}&limit=${limit}`,{},6000); if(r) return r.data; }catch(e){} }
     if(EDGE.on && offset===0){
       try{ const ctl=new AbortController(), tm=setTimeout(()=>ctl.abort(),2500);
-        const r=await fetch('/api/board',{signal:ctl.signal}); clearTimeout(tm);
+        const r=await fetch(EDGE_BASE+'/api/board',{signal:ctl.signal}); clearTimeout(tm);
         if(r.ok){ const rows=await r.json(); if(Array.isArray(rows)) return rows.slice(0,limit); }
       }catch(e){}
       EDGE.on=false;                                     // 边缘不可用：本次会话改为直连
@@ -1200,7 +1201,7 @@ function roomToast(t){ ROOM.toast=t; ROOM.toastAt=performance.now(); }
 function rtClient(kind){
   ROOM.clients=ROOM.clients||{};
   if(!ROOM.clients[kind]){
-    const base = kind==='edge' ? location.origin.replace(/^http/,'ws')+'/api/realtime'
+    const base = kind==='edge' ? EDGE_BASE.replace(/^http/,'ws')+'/api/realtime'
                                : LB_CONFIG.url.replace(/^http/,'ws').replace(/\/$/,'')+'/realtime/v1';
     ROOM.clients[kind] = new RealtimeClient(base, { params:{ apikey: LB_CONFIG.key, eventsPerSecond: 20 }, timeout: 7000 });
   }
