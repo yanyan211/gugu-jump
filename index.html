@@ -129,13 +129,15 @@
     <p class="sub" id="rmMatchInfo" style="display:none;margin:4px 0 0;color:#0a8a64"></p>
     <div class="grid" id="rmMembers"></div>
     <p class="sub" id="rmWaitHost">等房主开始游戏…</p>
-    <div class="row"><button class="btn ghost" id="rmLeave">退出房间</button><button class="btn main" id="rmStart">开始游戏</button></div>
+    <p class="sub" id="rmReadyHint" style="display:none;margin:2px 0 0;color:#c0392b"></p>
+    <div class="row"><button class="btn ghost" id="rmLeave">退出房间</button><button class="btn main" id="rmReady">准备</button><button class="btn main" id="rmStart">开始游戏</button></div>
   </div>
   <div id="rmResult">
     <h3 id="rmWinner"></h3><div class="steps" id="rmSteps"></div><p class="sub">按坚持到最后的顺序排名</p>
     <div class="list" id="rmRank"></div>
     <div class="row"><button class="btn ghost" id="rmQuit">退出房间</button><button class="btn ghost" id="rmBack">返回房间</button></div>
-    <div class="row" style="margin-top:8px"><button class="btn main" id="rmAgain">再来一局</button></div>
+    <p class="sub" id="rmReadyHint2" style="display:none;margin:6px 0 0;color:#c0392b"></p>
+    <div class="row" style="margin-top:8px"><button class="btn main" id="rmReady2">准备</button><button class="btn main" id="rmAgain">再来一局</button></div>
   </div>
   <div class="busy" id="rmBusy"></div>
   <div class="err" id="rmErr"></div>
@@ -1190,7 +1192,8 @@ async function openBoard(){
    - 方块序列：开局时房主发一个随机种子，所有人用同一个种子生成同样的方块
    ===================================================================== */
 const ROOM_MAX = 10, TURN_TIME = 10;
-const MATCH_CODES = ['81001','81002','81003','81004','81005','81006'], MATCH_MAX = 6, MATCH_GATHER_MS = 10000;   // 随机匹配池 / 每局上限 / 凑人倒计时          // 每人每次操作限时（秒）
+const MATCH_CODES = ['81001','81002','81003','81004','81005','81006'], MATCH_MAX = 6, MATCH_GATHER_MS = 10000;   // 随机匹配池 / 每局上限 / 凑人倒计时
+const READY_MS = 30000;   // 未准备自动离开房间的时限（2026-11-04 用户定：30 秒）          // 每人每次操作限时（秒）
 let rand = Math.random;                        // 方块随机数：单人模式用系统随机，房间模式用种子随机
 function seeded(seed){ let a = seed>>>0; return ()=>{ a|=0; a=a+0x6D2B79F5|0; let t=Math.imul(a^a>>>15,1|a); t=t+Math.imul(t^t>>>7,61|t)^t; return ((t^t>>>14)>>>0)/4294967296; }; }
 
@@ -1199,7 +1202,7 @@ const ROOM = {
   playing:false, order:[], alive:[], out:[], stats:{}, names:{}, avatars:{},
   turn:0, cur:null, turnStart:0, busy:false, pressed:false, remoteCharge:false,
   view:'lobby', toast:'', toastAt:0, hostWasMe:false,
-  match:false, matchAuto:false, matchUntil:0,
+  match:false, matchAuto:false, matchUntil:0, localUntil:0, fullSince:0, waitSince:0,
 };
 const isHost = ()=> ROOM.members.length && ROOM.members[0].id===PLAYER.id;
 const myTurn = ()=> ROOM.playing && ROOM.cur===PLAYER.id && !ROOM.busy;
@@ -1256,7 +1259,7 @@ function onPresence(ch){
   if(ch!==ROOM.ch) return;
   const before = ROOM.members.map(m=>m.id);
   ROOM.members = presenceList(ch);
-  if(ROOM.match){ const h=ROOM.members[0]; if(h && h.matchUntil) ROOM.matchUntil=h.matchUntil; }
+  if(ROOM.match){ const h=ROOM.members[0]; if(h && h.matchUntil){ ROOM.matchUntil=h.matchUntil; ROOM.localUntil=0; } }
   for(const m of ROOM.members){ ROOM.names[m.id]=m.name; ROOM.avatars[m.id]=m.avatar; }
   // 后来的人超过 10 人：自己退出
   const idx = ROOM.members.findIndex(m=>m.id===PLAYER.id);
@@ -1291,7 +1294,7 @@ async function createRoom(){
     const ch = await openChannelAny(code, 1500);   // 新房间号：等 1.5 秒确认没人在用
     if(!ch){ setRoomBusy(''); roomError('连接失败了，网络可能不太好，再试一次吧'); return; }
     if(presenceList(ch).filter(m=>m.id!==PLAYER.id).length){ ch.unsubscribe(); continue; }   // 这个号已经有人在用，换一个
-    ROOM.ch=ch; ROOM.code=code; ROOM.joinedAt=Date.now(); ROOM.match=false; ROOM.matchAuto=false; ROOM.matchUntil=0; await track();
+    ROOM.ch=ch; ROOM.code=code; ROOM.joinedAt=Date.now(); ROOM.match=false; ROOM.matchAuto=false; ROOM.matchUntil=0; ROOM.waitSince=Date.now(); await track();
     ROOM.view='wait'; setRoomBusy(''); renderRoom(); return;
   }
   setRoomBusy(''); roomError('创建失败了，再试一次吧');
@@ -1315,13 +1318,13 @@ async function joinRoom(code){
 async function finishJoin(ch, code, list, fail){
   if(list.some(m=>m.playing)) return fail('这局已经开始了，等他们玩完再进来吧');
   if(list.length>=ROOM_MAX) return fail('房间满啦，换一个房间吧');
-  ROOM.ch=ch; ROOM.code=code; ROOM.joinedAt=Date.now(); ROOM.match=false; ROOM.matchAuto=false; ROOM.matchUntil=0; await track();
+  ROOM.ch=ch; ROOM.code=code; ROOM.joinedAt=Date.now(); ROOM.match=false; ROOM.matchAuto=false; ROOM.matchUntil=0; ROOM.waitSince=Date.now(); await track();
   ROOM.view='wait'; setRoomBusy(''); renderRoom();
 }
 function leaveRoom(msg){
   try{ ROOM.ch && ROOM.ch.unsubscribe(); }catch(e){}
   for(const k in (ROOM.clients||{})) rtDrop(k);
-  Object.assign(ROOM,{ client:null, ch:null, code:'', joinedAt:0, members:[], playing:false, busy:false, pressed:false, remoteCharge:false, view:'lobby', hostWasMe:false, match:false, matchAuto:false, matchUntil:0 });
+  Object.assign(ROOM,{ client:null, ch:null, code:'', joinedAt:0, members:[], playing:false, busy:false, pressed:false, remoteCharge:false, view:'lobby', hostWasMe:false, match:false, matchAuto:false, matchUntil:0, localUntil:0, fullSince:0, waitSince:0 });
   rand=Math.random; stopSnd();
   if(msg){ ROOM.view='lobby'; renderRoom(); roomError(msg); }
   else closeRoomUI();
@@ -1351,8 +1354,8 @@ async function matchRoom(){
       try{ ch.unsubscribe(); }catch(e){}
       continue;   // 私有房占了这个号 / 这局已开始 / 这间匹配房满了：换下一间
     }
-    ROOM.ch=ch; ROOM.code=code; ROOM.joinedAt=Date.now(); ROOM.match=true; ROOM.matchAuto=true;
-    ROOM.matchUntil = list.length ? (list[0].matchUntil||0) : 0;
+    ROOM.ch=ch; ROOM.code=code; ROOM.joinedAt=Date.now(); ROOM.match=true; ROOM.matchAuto=true; ROOM.waitSince=Date.now();
+    ROOM.matchUntil = list.length ? (list[0].matchUntil||0) : 0; ROOM.localUntil=0; ROOM.fullSince=0;
     await track({ match:true });
     if(MATCH_ABORT){ leaveRoom(); return; }   // 占房瞬间用户取消了：立刻退出，别把人带进房
     ROOM.view='wait'; setRoomBusy(''); renderRoom(); return;
@@ -1366,26 +1369,56 @@ function enterMatch(){ if(ROOM.ch){ openRoom(); return; } MATCH_ABORT=false; roo
 setInterval(()=>{
   if(!ROOM.ch || !ROOM.match || ROOM.playing || ROOM.view!=='wait') return;
   const n=ROOM.members.length;
-  if(isHost() && ROOM.matchAuto){
-    if(n>=MATCH_MAX){ ROOM.matchUntil=0; hostStart(); return; }
-    if(n>=2){
-      if(!ROOM.matchUntil){ ROOM.matchUntil=Date.now()+MATCH_GATHER_MS; track({ matchUntil:ROOM.matchUntil }); }
-      else if(Date.now()>=ROOM.matchUntil){ ROOM.matchUntil=0; hostStart(); return; }
-    } else if(ROOM.matchUntil){ ROOM.matchUntil=0; track({ matchUntil:0 }); }
+  const readyN2=ROOM.members.filter(m=>m.ready).length, allReady2=n>0 && readyN2===n;
+  if(ROOM.matchAuto && !allReady2){ if(ROOM.matchUntil && isHost()) track({ matchUntil:0 }); ROOM.matchUntil=0; ROOM.localUntil=0; ROOM.fullSince=0; }
+  if(ROOM.matchAuto && allReady2){
+    const myIdx=ROOM.members.findIndex(m=>m.id===PLAYER.id);
+    if(n<MATCH_MAX) ROOM.fullSince=0; else if(!ROOM.fullSince) ROOM.fullSince=Date.now();
+    if(n>=MATCH_MAX){
+      // 满人立即开始：排第一位的人先开；没反应时按入房顺序每 1.5 秒顺延一位代开（防房主挂机/锁屏卡房）
+      if(myIdx>=0 && Date.now()-ROOM.fullSince>=myIdx*1500){ ROOM.matchUntil=0; ROOM.localUntil=0; autoStart(); return; }
+    } else if(n>=2){
+      if(!ROOM.matchUntil && !ROOM.localUntil){
+        if(isHost()){ ROOM.matchUntil=Date.now()+MATCH_GATHER_MS; track({ matchUntil:ROOM.matchUntil }); }
+        else ROOM.localUntil=Date.now()+MATCH_GATHER_MS;   // 房主迟迟没设定时间时，各自用本地时间兜底计时
+      }
+      const until=ROOM.matchUntil||ROOM.localUntil;
+      // 到点后排第一位的人先开；没反应时按入房顺序每 3 秒顺延一位代开
+      if(until && myIdx>=0 && Date.now()>=until+myIdx*3000){ const wasHost=isHost(); ROOM.matchUntil=0; ROOM.localUntil=0; if(wasHost) track({ matchUntil:0 }); autoStart(); return; }
+    } else {
+      if(ROOM.matchUntil && isHost()){ ROOM.matchUntil=0; track({ matchUntil:0 }); }
+      ROOM.localUntil=0;
+    }
   }
   const mi=$('rmMatchInfo');
   if(mi && $('rmWait').style.display!=='none'){
     mi.style.display='block';
     if(n<2) mi.textContent='🎲 随机匹配房 · 正在等其他玩家加入，你也可以先退出去玩单人';
-    else if(ROOM.matchUntil){ const s=Math.max(0,Math.ceil((ROOM.matchUntil-Date.now())/1000)); mi.textContent=`🎲 随机匹配房 · 已有 ${n} 人，${s} 秒后自动开始，满 6 人提前开始`; }
+    else if(!allReady2) mi.textContent=`🎲 随机匹配房 · 等小伙伴准备（${readyN2}/${n} 已准备）`;
+    else if(ROOM.matchUntil||ROOM.localUntil){ const s=Math.max(0,Math.ceil(((ROOM.matchUntil||ROOM.localUntil)-Date.now())/1000)); mi.textContent=`🎲 随机匹配房 · 已有 ${n} 人，${s} 秒后自动开始，满 6 人提前开始`; }
     else mi.textContent=`🎲 随机匹配房 · 已有 ${n} 人，等房主自动开始…`;
   }
+}, 500);
+
+/* ---------- 准备看门狗（所有房间）：30 秒未准备自动离开，独自一人时不计时 ---------- */
+setInterval(()=>{
+  if(!ROOM.ch || ROOM.playing) return;
+  if(ROOM.view!=='wait' && ROOM.view!=='result') return;
+  const hint = ROOM.view==='wait' ? $('rmReadyHint') : $('rmReadyHint2');
+  if(ROOM.members.length<2){ ROOM.waitSince=Date.now(); if(hint) hint.style.display='none'; return; }
+  const myReady=!!(ROOM.ch._meta && ROOM.ch._meta.ready);
+  if(myReady){ if(hint) hint.style.display='none'; return; }
+  if(!ROOM.waitSince) return;
+  const left=READY_MS-(Date.now()-ROOM.waitSince);
+  if(left<=0){ leaveRoom('30 秒没有准备，已自动离开房间'); return; }
+  if(hint){ hint.style.display = left<=10000 ? 'block' : 'none'; if(left<=10000) hint.textContent=`还没准备的话，${Math.ceil(left/1000)} 秒后会自动离开房间`; }
 }, 500);
 
 /* ---------- 消息处理（所有人都执行同一套） ---------- */
 function handle(p){
   switch(p.ev){
-    case 'start': return startRoomGame(p);
+    case 'start': if(ROOM.playing) return; if(!p.order.includes(PLAYER.id)) return; return startRoomGame(p);
+    case 'kick': if(p.id===PLAYER.id && !ROOM.playing) leaveRoom('你被房主踢出了房间'); return;
     case 'press': if(ROOM.playing && p.turn===ROOM.turn && p.by!==PLAYER.id && !ROOM.busy){ ROOM.remoteCharge=true; hero.baseX=hero.x; hero.baseY=hero.y; playStart(); } return;
     case 'jump':  return roomJump(p);
     case 'out':   return roomOut(p.by, p.turn, p.why);
@@ -1393,7 +1426,7 @@ function handle(p){
   }
 }
 function startRoomGame(p){
-  ROOM.playing=true; ROOM.matchAuto=false; ROOM.order=p.order.slice(); ROOM.alive=p.order.slice(); ROOM.out=[]; ROOM.stats={}; ROOM.steps=0;
+  ROOM.playing=true; ROOM.matchAuto=false; ROOM.localUntil=0; ROOM.fullSince=0; ROOM.order=p.order.slice(); ROOM.alive=p.order.slice(); ROOM.out=[]; ROOM.stats={}; ROOM.steps=0;
   for(const id of p.order) ROOM.stats[id]=0;
   if(p.names) Object.assign(ROOM.names,p.names); if(p.avatars) Object.assign(ROOM.avatars,p.avatars);
   rand = seeded(p.seed);
@@ -1469,7 +1502,7 @@ function roomGone(id){   // 掉线
   if(ROOM.alive.length<=1 && ROOM.order.length>=2 && !ROOM.busy) endRoomGame();
 }
 function endRoomGame(){
-  ROOM.playing=false; G.state=6; ROOM.cur=null; rand=Math.random;
+  ROOM.playing=false; if(ROOM.match){ ROOM.matchAuto=true; ROOM.matchUntil=0; ROOM.localUntil=0; ROOM.fullSince=0; } ROOM.waitSince=Date.now(); if(ROOM.ch && ROOM.ch._meta && ROOM.ch._meta.ready) track({ ready:false }); G.state=6; ROOM.cur=null; rand=Math.random;
   const ranking = ROOM.alive.concat(ROOM.out.slice().reverse());   // 活到最后的排第一，越早掉越靠后
   ROOM.resultSteps = ROOM.steps||0;
   ROOM.result = ranking.map(id=>({ id, name:ROOM.names[id]||'?', avatar:ROOM.avatars[id], jumps:ROOM.stats[id]||0 }));
@@ -1486,7 +1519,7 @@ function roomTick(dt){
     if(G.state===2){ roomRelease(); return; }                   // 正在蓄力：时间到自动松手
     if(G.state===1){ G.state=6; emit({ ev:'out', by:PLAYER.id, turn:ROOM.turn, why:'timeout' }); return; }
   }
-  if(isHost() && ROOM.cur!==PLAYER.id && el>=TURN_TIME+5){ emit({ ev:'out', by:ROOM.cur, turn:ROOM.turn, why:'timeout' }); ROOM.turnStart=performance.now(); }
+  if(ROOM.cur!==PLAYER.id && ROOM.alive.includes(PLAYER.id)){ const watchers=ROOM.alive.filter(id=>id!==ROOM.cur), wi=watchers.indexOf(PLAYER.id); if(wi>=0 && el>=TURN_TIME+2+wi*2){ emit({ ev:'out', by:ROOM.cur, turn:ROOM.turn, why:'timeout' }); ROOM.turnStart=performance.now(); } }
 }
 
 /* ---------- 游戏中的顶部信息：倒计时 + 玩家头像 ---------- */
@@ -1556,14 +1589,21 @@ function renderRoom(){
       const m=ROOM.members[i], d=document.createElement('div'); d.className='slot'+(m?'':' empty');
       if(m){ const im=document.createElement('img'); avatarFallback(im,m.avatar); im.src=safeAvatarSrc(m.avatar); im.alt='';
         const nm=document.createElement('span'); nm.textContent=m.name+(m.id===PLAYER.id?'（我）':'');
-        d.append(im,nm); if(i===0){ const c=document.createElement('b'); c.textContent='房主'; d.append(c); } }
+        const rd=document.createElement('span'); rd.textContent=m.ready?' ✅':' ⏳'; rd.title=m.ready?'已准备':'未准备';
+        d.append(im,nm,rd); if(i===0){ const c=document.createElement('b'); c.textContent='房主'; d.append(c); }
+        if(isHost() && m.id!==PLAYER.id){ const kx=document.createElement('button'); kx.textContent='✕'; kx.title='踢出房间'; kx.dataset.kick=m.id; kx.style.cssText='margin-left:6px;border:none;background:#f6e8e8;border-radius:50%;width:22px;height:22px;line-height:22px;color:#c0392b;cursor:pointer;padding:0'; d.append(kx); } }
       g.append(d);
     }
     $('rmCount').textContent=`${ROOM.members.length} / ${ROOM_MAX}`;
     const mi=$('rmMatchInfo'); if(mi){ mi.style.display=ROOM.match?'block':'none'; if(ROOM.match) mi.textContent = ROOM.members.length<2 ? '🎲 随机匹配房 · 正在等其他玩家加入…' : '🎲 随机匹配房 · 人齐啦，马上开始…'; }
     const host=isHost(); $('rmStart').style.display=host?'block':'none'; $('rmWaitHost').style.display=host?'none':'block';
-    $('rmStart').disabled = ROOM.members.length<2;
-    $('rmStart').textContent = ROOM.members.length<2 ? '至少 2 人才能开始' : '开始游戏';
+    const readyN=ROOM.members.filter(m=>m.ready).length, allReady=ROOM.members.length>0 && readyN===ROOM.members.length;
+    const meM=ROOM.members.find(m=>m.id===PLAYER.id), myReady=!!(meM&&meM.ready);
+    const rb=$('rmReady'); rb.textContent = myReady ? '已准备 ✓（点此取消）' : '准备';
+    rb.className = 'btn ' + (myReady ? 'ghost' : 'main');
+    $('rmStart').disabled = !(ROOM.members.length>=2 && allReady);
+    $('rmStart').textContent = ROOM.members.length<2 ? '至少 2 人才能开始' : (!allReady ? `等全员准备 ${readyN}/${ROOM.members.length}` : '开始游戏');
+    if(!host) $('rmWaitHost').textContent = !myReady ? '点「准备」后，等房主开始游戏' : (!allReady ? `还有小伙伴没准备（${readyN}/${ROOM.members.length}）` : '都准备好了，等房主开始…');
     return;
   }
   if(v==='result'){
@@ -1579,15 +1619,18 @@ function renderRoom(){
       const sc=document.createElement('span'); sc.className='sc'; sc.textContent=x.jumps+' 跳';
       d.append(no,im,nm,sc); l.append(d); });
     $('rmAgain').style.display = isHost() ? 'block' : 'none';
-    $('rmAgain').disabled = ROOM.members.length<2;
+    $('rmAgain').disabled = ROOM.members.length<2 || ROOM.members.some(m=>!m.ready);
+    { const meM2=ROOM.members.find(m=>m.id===PLAYER.id), myR2=!!(meM2&&meM2.ready); const rb2=$('rmReady2'); if(rb2){ rb2.textContent = myR2 ? '已准备 ✓（点此取消）' : '准备'; rb2.className='btn ' + (myR2 ? 'ghost' : 'main'); } }
   }
 }
 function hostStart(){
   if(!isHost() || ROOM.members.length<2) return;
+  if(ROOM.members.some(m=>!m.ready)){ roomToast('还有小伙伴没准备好'); return; }
   const order=ROOM.members.slice(0,ROOM_MAX).map(m=>m.id), names={}, avatars={};
   for(const m of ROOM.members){ names[m.id]=m.name; avatars[m.id]=m.avatar; }
   emit({ ev:'start', seed:Math.floor(Math.random()*2**31), order, names, avatars });
 }
+function autoStart(){ if(ROOM.playing || ROOM.members.length<2 || ROOM.members.some(m=>!m.ready)) return; const order=ROOM.members.slice(0,MATCH_MAX).map(m=>m.id), names={}, avatars={}; for(const m of ROOM.members){ names[m.id]=m.name; avatars[m.id]=m.avatar; } emit({ ev:'start', seed:Math.floor(Math.random()*2**31), order, names, avatars }); }
 function bindRoomUI(){
   $('rmCreate').onclick=()=>{ roomError(''); createRoom(); };
   $('rmJoin').onclick=()=>{ roomError(''); joinRoom($('rmInput').value); };
@@ -1599,6 +1642,10 @@ function bindRoomUI(){
   $('rmLeave').onclick=()=>leaveRoom();
   $('rmCopy').onclick=()=>{ try{ navigator.clipboard.writeText(ROOM.code); $('rmCopy').textContent='已复制'; setTimeout(()=>$('rmCopy').textContent='复制',1200); }catch(e){} };
   $('rmAgain').onclick=()=>hostStart();
+  const toggleReady=()=>{ const now=!((ROOM.ch&&ROOM.ch._meta&&ROOM.ch._meta.ready)); track({ ready: now }); if(!now) ROOM.waitSince=Date.now(); renderRoom(); };
+  $('rmReady').onclick=toggleReady;
+  { const r2=$('rmReady2'); if(r2) r2.onclick=toggleReady; }
+  $('rmMembers').onclick=e=>{ const k=e.target && e.target.dataset && e.target.dataset.kick; if(k && isHost() && !ROOM.playing) emit({ ev:'kick', id:k }); };
   $('rmBack').onclick=()=>{ ROOM.result=null; ROOM.view='wait'; renderRoom(); };
   $('rmQuit').onclick=()=>leaveRoom();
 }
